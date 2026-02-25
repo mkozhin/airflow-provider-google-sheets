@@ -11,38 +11,32 @@ Demonstrates GoogleSheetsWriteOperator with write_mode='smart_merge':
 
 from datetime import datetime
 
-from airflow import DAG
+from airflow.decorators import dag
 
 from airflow_provider_google_sheets.operators.write import GoogleSheetsWriteOperator
 
 SPREADSHEET_ID = "your-spreadsheet-id-here"
 GCP_CONN_ID = "google_cloud_default"
 
-default_args = {
-    "owner": "airflow",
-    "start_date": datetime(2024, 1, 1),
-    "retries": 1,
-}
-
 
 # ---------------------------------------------------------------------------
 # DAG 1: Basic smart merge — update by date key
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_smart_merge_basic",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example", "smart-merge"],
-) as dag_basic:
-
+)
+def sheets_smart_merge_basic():
     # Sheet has:
     #   date       | revenue | region
     #   2024-01-01 | 1000    | US
     #   2024-01-02 | 1500    | EU
     #
     # Incoming data updates 2024-01-01 and adds 2024-01-03:
-    merge_by_date = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="merge_by_date",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -56,20 +50,23 @@ with DAG(
     )
 
 
+sheets_smart_merge_basic()
+
+
 # ---------------------------------------------------------------------------
 # DAG 2: Smart merge with multiple rows per key (insert/delete)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_smart_merge_multi_row",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example", "smart-merge"],
-) as dag_multi:
-
+)
+def sheets_smart_merge_multi_row():
     # Sheet has 2 rows for key "US", incoming has 4 → insert 2 extra rows
     # Sheet has 3 rows for key "EU", incoming has 1 → delete 2 surplus rows
-    merge_multi = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="merge_multi_row_keys",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -88,17 +85,20 @@ with DAG(
     )
 
 
+sheets_smart_merge_multi_row()
+
+
 # ---------------------------------------------------------------------------
 # DAG 3: Combined scenario — insert + delete + update + append
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_smart_merge_combined",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example", "smart-merge"],
-) as dag_combined:
-
+)
+def sheets_smart_merge_combined():
     # Existing sheet:
     #   id | name   | status
     #   A  | Alice  | active     ← will be updated
@@ -109,7 +109,7 @@ with DAG(
     #   D  | Dave   | active     ← not in incoming → left as-is
     #                              key E is new → append
 
-    merge_combined = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="merge_combined",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -127,20 +127,23 @@ with DAG(
     )
 
 
+sheets_smart_merge_combined()
+
+
 # ---------------------------------------------------------------------------
 # DAG 4: Smart merge without headers (has_headers=False)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_smart_merge_no_headers",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example", "smart-merge"],
-) as dag_no_headers:
-
+)
+def sheets_smart_merge_no_headers():
     # When has_headers=False, row 1 is treated as data (not header).
     # merge_key still references the column name from the incoming data headers.
-    merge_no_headers = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="merge_no_headers",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -153,3 +156,6 @@ with DAG(
             {"key": "Y", "value": 200},
         ],
     )
+
+
+sheets_smart_merge_no_headers()

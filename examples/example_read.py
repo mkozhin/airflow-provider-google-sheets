@@ -9,32 +9,25 @@ Demonstrates various GoogleSheetsReadOperator configurations:
 
 from datetime import datetime
 
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.decorators import dag, task
 
 from airflow_provider_google_sheets.operators.read import GoogleSheetsReadOperator
 
 SPREADSHEET_ID = "your-spreadsheet-id-here"
 GCP_CONN_ID = "google_cloud_default"
 
-default_args = {
-    "owner": "airflow",
-    "start_date": datetime(2024, 1, 1),
-    "retries": 1,
-}
-
 
 # ---------------------------------------------------------------------------
 # DAG 1: Basic read to XCom
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_read_basic",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag_basic:
-
+)
+def sheets_read_basic():
     # Read with headers — returns list[dict]
     read_with_headers = GoogleSheetsReadOperator(
         task_id="read_with_headers",
@@ -60,29 +53,31 @@ with DAG(
         cell_range="B2:D100",
     )
 
-    def print_data(**context):
+    @task
+    def show_data(**context):
         data = context["ti"].xcom_pull(task_ids="read_with_headers")
         print(f"Read {len(data)} rows")
         for row in data[:5]:
             print(row)
 
-    show = PythonOperator(task_id="show_data", python_callable=print_data)
+    read_with_headers >> show_data()
 
-    read_with_headers >> show
+
+sheets_read_basic()
 
 
 # ---------------------------------------------------------------------------
 # DAG 2: Read with schema type conversion
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_read_schema",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag_schema:
-
-    read_typed = GoogleSheetsReadOperator(
+)
+def sheets_read_schema():
+    GoogleSheetsReadOperator(
         task_id="read_with_schema",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -96,19 +91,22 @@ with DAG(
     )
 
 
+sheets_read_schema()
+
+
 # ---------------------------------------------------------------------------
 # DAG 3: Streaming to CSV / JSON files
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_read_streaming",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag_streaming:
-
+)
+def sheets_read_streaming():
     # Stream to CSV — no memory accumulation for large sheets
-    stream_csv = GoogleSheetsReadOperator(
+    GoogleSheetsReadOperator(
         task_id="stream_to_csv",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -119,7 +117,7 @@ with DAG(
     )
 
     # Stream to JSON
-    stream_json = GoogleSheetsReadOperator(
+    GoogleSheetsReadOperator(
         task_id="stream_to_json",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -130,7 +128,7 @@ with DAG(
     )
 
     # XCom with row limit protection
-    read_safe = GoogleSheetsReadOperator(
+    GoogleSheetsReadOperator(
         task_id="read_xcom_with_limit",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -139,20 +137,23 @@ with DAG(
     )
 
 
+sheets_read_streaming()
+
+
 # ---------------------------------------------------------------------------
 # DAG 4: Header processing (transliteration, normalization)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_read_headers",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag_headers:
-
+)
+def sheets_read_headers():
     # Transliterate Cyrillic headers to Latin
     # "Дата" → "data", "Выручка" → "vyruchka"
-    read_translit = GoogleSheetsReadOperator(
+    GoogleSheetsReadOperator(
         task_id="read_transliterated",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -161,7 +162,7 @@ with DAG(
 
     # Normalize headers to snake_case
     # "Revenue (USD)" → "revenue_usd"
-    read_normalized = GoogleSheetsReadOperator(
+    GoogleSheetsReadOperator(
         task_id="read_normalized",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -169,10 +170,13 @@ with DAG(
     )
 
     # Both: transliterate + normalize
-    read_both = GoogleSheetsReadOperator(
+    GoogleSheetsReadOperator(
         task_id="read_translit_and_normalized",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
         transliterate_headers=True,
         normalize_headers=True,
     )
+
+
+sheets_read_headers()

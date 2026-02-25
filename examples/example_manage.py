@@ -7,8 +7,7 @@ Demonstrates:
 
 from datetime import datetime
 
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.decorators import dag, task
 
 from airflow_provider_google_sheets.operators.manage import (
     GoogleSheetsCreateSheetOperator,
@@ -17,20 +16,15 @@ from airflow_provider_google_sheets.operators.manage import (
 
 GCP_CONN_ID = "google_cloud_default"
 
-default_args = {
-    "owner": "airflow",
-    "start_date": datetime(2024, 1, 1),
-    "retries": 1,
-}
 
-with DAG(
+@dag(
     dag_id="example_sheets_manage",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag:
-
+)
+def sheets_manage():
     # Create a new spreadsheet with predefined sheets
     create_spreadsheet = GoogleSheetsCreateSpreadsheetOperator(
         task_id="create_spreadsheet",
@@ -48,10 +42,12 @@ with DAG(
         sheet_title="Archive",
     )
 
-    def log_result(**context):
+    @task
+    def log_url(**context):
         sid = context["ti"].xcom_pull(task_ids="create_spreadsheet")
         print(f"Created spreadsheet: https://docs.google.com/spreadsheets/d/{sid}")
 
-    log = PythonOperator(task_id="log_url", python_callable=log_result)
+    create_spreadsheet >> add_sheet >> log_url()
 
-    create_spreadsheet >> add_sheet >> log
+
+sheets_manage()

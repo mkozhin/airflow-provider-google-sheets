@@ -8,8 +8,7 @@ Demonstrates three patterns:
 
 from datetime import datetime
 
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.decorators import dag, task
 from airflow.providers.google.cloud.operators.bigquery import (
     BigQueryInsertJobOperator,
 )
@@ -22,24 +21,18 @@ BQ_PROJECT = "your-gcp-project"
 BQ_DATASET = "your_dataset"
 BQ_TABLE = "your_table"
 
-default_args = {
-    "owner": "airflow",
-    "start_date": datetime(2024, 1, 1),
-    "retries": 1,
-}
-
 
 # ---------------------------------------------------------------------------
 # DAG 1: Sheets → BigQuery (overwrite)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_to_bq_overwrite",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "bigquery", "example"],
-) as dag_overwrite:
-
+)
+def sheets_to_bq_overwrite():
     read_sheets = GoogleSheetsReadOperator(
         task_id="read_from_sheets",
         gcp_conn_id=GCP_CONN_ID,
@@ -52,22 +45,18 @@ with DAG(
         },
     )
 
-    def build_bq_rows(**context):
+    @task
+    def prepare_bq_load(**context):
         """Convert list[dict] from XCom to newline-delimited JSON for BQ load."""
         import json
+
         rows = context["ti"].xcom_pull(task_ids="read_from_sheets")
         ndjson_path = "/tmp/sheets_to_bq.jsonl"
         with open(ndjson_path, "w") as f:
             for row in rows:
-                # Convert date objects to strings for JSON serialization
                 row_copy = {k: str(v) if hasattr(v, "isoformat") else v for k, v in row.items()}
                 f.write(json.dumps(row_copy) + "\n")
         return ndjson_path
-
-    prepare = PythonOperator(
-        task_id="prepare_bq_load",
-        python_callable=build_bq_rows,
-    )
 
     load_bq = BigQueryInsertJobOperator(
         task_id="load_to_bigquery",
@@ -87,20 +76,23 @@ with DAG(
         },
     )
 
-    read_sheets >> prepare >> load_bq
+    read_sheets >> prepare_bq_load() >> load_bq
+
+
+sheets_to_bq_overwrite()
 
 
 # ---------------------------------------------------------------------------
 # DAG 2: Sheets → BigQuery (append)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_to_bq_append",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "bigquery", "example"],
-) as dag_append:
-
+)
+def sheets_to_bq_append():
     read_new_rows = GoogleSheetsReadOperator(
         task_id="read_new_rows",
         gcp_conn_id=GCP_CONN_ID,
@@ -108,8 +100,10 @@ with DAG(
         sheet_name="NewEntries",
     )
 
-    def prepare_append_rows(**context):
+    @task
+    def prepare_append(**context):
         import json
+
         rows = context["ti"].xcom_pull(task_ids="read_new_rows")
         path = "/tmp/sheets_append.jsonl"
         with open(path, "w") as f:
@@ -117,11 +111,6 @@ with DAG(
                 row_copy = {k: str(v) if hasattr(v, "isoformat") else v for k, v in row.items()}
                 f.write(json.dumps(row_copy) + "\n")
         return path
-
-    prepare = PythonOperator(
-        task_id="prepare_append",
-        python_callable=prepare_append_rows,
-    )
 
     append_bq = BigQueryInsertJobOperator(
         task_id="append_to_bigquery",
@@ -141,20 +130,23 @@ with DAG(
         },
     )
 
-    read_new_rows >> prepare >> append_bq
+    read_new_rows >> prepare_append() >> append_bq
+
+
+sheets_to_bq_append()
 
 
 # ---------------------------------------------------------------------------
 # DAG 3: Sheets → BigQuery (update by date range)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_to_bq_date_update",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "bigquery", "example"],
-) as dag_date_update:
-
+)
+def sheets_to_bq_date_update():
     read_data = GoogleSheetsReadOperator(
         task_id="read_sheets_data",
         gcp_conn_id=GCP_CONN_ID,
@@ -167,6 +159,7 @@ with DAG(
         },
     )
 
+    @task
     def compute_date_range(**context):
         """Determine min/max date from the data read from Sheets."""
         rows = context["ti"].xcom_pull(task_ids="read_sheets_data")
@@ -177,11 +170,6 @@ with DAG(
         context["ti"].xcom_push(key="min_date", value=min_date)
         context["ti"].xcom_push(key="max_date", value=max_date)
         return {"min_date": min_date, "max_date": max_date}
-
-    calc_range = PythonOperator(
-        task_id="compute_date_range",
-        python_callable=compute_date_range,
-    )
 
     # Delete existing rows in BigQuery for the date range
     delete_period = BigQueryInsertJobOperator(
@@ -199,8 +187,10 @@ with DAG(
         },
     )
 
-    def prepare_insert_rows(**context):
+    @task
+    def prepare_insert(**context):
         import json
+
         rows = context["ti"].xcom_pull(task_ids="read_sheets_data")
         path = "/tmp/sheets_date_update.jsonl"
         with open(path, "w") as f:
@@ -208,11 +198,6 @@ with DAG(
                 row_copy = {k: str(v) if hasattr(v, "isoformat") else v for k, v in row.items()}
                 f.write(json.dumps(row_copy) + "\n")
         return path
-
-    prepare = PythonOperator(
-        task_id="prepare_insert",
-        python_callable=prepare_insert_rows,
-    )
 
     insert_new = BigQueryInsertJobOperator(
         task_id="insert_new_data",
@@ -232,4 +217,7 @@ with DAG(
         },
     )
 
-    read_data >> calc_range >> delete_period >> prepare >> insert_new
+    read_data >> compute_date_range() >> delete_period >> prepare_insert() >> insert_new
+
+
+sheets_to_bq_date_update()

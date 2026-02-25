@@ -9,34 +9,27 @@ Demonstrates GoogleSheetsWriteOperator in overwrite and append modes:
 
 from datetime import datetime
 
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.decorators import dag, task
 
 from airflow_provider_google_sheets.operators.write import GoogleSheetsWriteOperator
 
 SPREADSHEET_ID = "your-spreadsheet-id-here"
 GCP_CONN_ID = "google_cloud_default"
 
-default_args = {
-    "owner": "airflow",
-    "start_date": datetime(2024, 1, 1),
-    "retries": 1,
-}
-
 
 # ---------------------------------------------------------------------------
 # DAG 1: Overwrite mode
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_write_overwrite",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag_overwrite:
-
+)
+def sheets_write_overwrite():
     # Write list[dict] data — headers auto-detected from keys
-    write_dicts = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="write_from_dicts",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -49,7 +42,7 @@ with DAG(
     )
 
     # Write to a specific range (e.g. starting from B2)
-    write_range = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="write_to_range",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -63,7 +56,7 @@ with DAG(
     )
 
     # Write list[list] data without headers
-    write_raw = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="write_raw_lists",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -74,7 +67,7 @@ with DAG(
     )
 
     # Write from a CSV file
-    write_csv = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="write_from_csv",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -84,7 +77,7 @@ with DAG(
     )
 
     # Batched write for large datasets
-    write_batched = GoogleSheetsWriteOperator(
+    GoogleSheetsWriteOperator(
         task_id="write_large_batched",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -96,18 +89,21 @@ with DAG(
     )
 
 
+sheets_write_overwrite()
+
+
 # ---------------------------------------------------------------------------
 # DAG 2: Append mode
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_write_append",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag_append:
-
-    append_rows = GoogleSheetsWriteOperator(
+)
+def sheets_write_append():
+    GoogleSheetsWriteOperator(
         task_id="append_new_rows",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -120,30 +116,28 @@ with DAG(
     )
 
 
+sheets_write_append()
+
+
 # ---------------------------------------------------------------------------
 # DAG 3: Write from XCom (read → transform → write pipeline)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_read_transform_write",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag_pipeline:
-
-    def generate_report(**context):
+)
+def sheets_read_transform_write():
+    @task
+    def generate_report():
         """Generate report data and push to XCom."""
-        report = [
+        return [
             {"metric": "total_users", "value": 42000},
             {"metric": "active_users", "value": 15000},
             {"metric": "revenue", "value": 125000.50},
         ]
-        return report
-
-    generate = PythonOperator(
-        task_id="generate_report",
-        python_callable=generate_report,
-    )
 
     write_report = GoogleSheetsWriteOperator(
         task_id="write_report_to_sheets",
@@ -154,21 +148,24 @@ with DAG(
         data_xcom_task_id="generate_report",
     )
 
-    generate >> write_report
+    generate_report() >> write_report
+
+
+sheets_read_transform_write()
 
 
 # ---------------------------------------------------------------------------
 # DAG 4: Write with schema formatting
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_sheets_write_schema",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "example"],
-) as dag_schema:
-
-    write_formatted = GoogleSheetsWriteOperator(
+)
+def sheets_write_schema():
+    GoogleSheetsWriteOperator(
         task_id="write_with_schema",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
@@ -184,3 +181,6 @@ with DAG(
             {"date": "2024-01-16", "amount": 150.00, "is_paid": False},
         ],
     )
+
+
+sheets_write_schema()

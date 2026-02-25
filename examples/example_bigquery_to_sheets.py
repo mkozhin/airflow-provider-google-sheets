@@ -9,8 +9,7 @@ For large datasets (>50k rows), uses CSV streaming via GCS.
 
 from datetime import datetime
 
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.decorators import dag, task
 from airflow.providers.google.cloud.operators.bigquery import (
     BigQueryInsertJobOperator,
 )
@@ -27,24 +26,18 @@ BQ_DATASET = "your_dataset"
 BQ_TABLE = "your_table"
 GCS_BUCKET = "your-temp-bucket"
 
-default_args = {
-    "owner": "airflow",
-    "start_date": datetime(2024, 1, 1),
-    "retries": 1,
-}
-
 
 # ---------------------------------------------------------------------------
 # DAG 1: BigQuery → Sheets (overwrite, small dataset via XCom)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_bq_to_sheets_overwrite_small",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "bigquery", "example"],
-) as dag_small:
-
+)
+def bq_to_sheets_overwrite_small():
     query_bq = BigQueryInsertJobOperator(
         task_id="query_bigquery",
         gcp_conn_id=GCP_CONN_ID,
@@ -67,21 +60,17 @@ with DAG(
         },
     )
 
-    def fetch_query_results(**context):
+    @task
+    def fetch_results(**context):
         """Read results from the temp table via BigQuery API."""
         from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+
         hook = BigQueryHook(gcp_conn_id=GCP_CONN_ID)
         records = hook.get_records(
             f"SELECT * FROM `{BQ_PROJECT}.{BQ_DATASET}.tmp_sheets_export`"
         )
-        # BigQuery returns list[tuple], convert to list[dict]
         columns = ["date", "region", "revenue", "quantity"]
         return [dict(zip(columns, row)) for row in records]
-
-    fetch = PythonOperator(
-        task_id="fetch_results",
-        python_callable=fetch_query_results,
-    )
 
     write_sheets = GoogleSheetsWriteOperator(
         task_id="write_to_sheets",
@@ -94,20 +83,23 @@ with DAG(
         pause_between_batches=1.0,
     )
 
-    query_bq >> fetch >> write_sheets
+    query_bq >> fetch_results() >> write_sheets
+
+
+bq_to_sheets_overwrite_small()
 
 
 # ---------------------------------------------------------------------------
 # DAG 2: BigQuery → Sheets (overwrite, large dataset via GCS+CSV)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_bq_to_sheets_overwrite_large",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "bigquery", "example"],
-) as dag_large:
-
+)
+def bq_to_sheets_overwrite_large():
     # Export BigQuery table to CSV in GCS
     export_to_gcs = BigQueryToGCSOperator(
         task_id="export_to_gcs",
@@ -118,9 +110,11 @@ with DAG(
         print_header=True,
     )
 
-    def download_from_gcs(**context):
+    @task
+    def download_csv(**context):
         """Download CSV from GCS to local filesystem."""
         from airflow.providers.google.cloud.hooks.gcs import GCSHook
+
         hook = GCSHook(gcp_conn_id=GCP_CONN_ID)
         local_path = "/tmp/bq_export.csv"
         hook.download(
@@ -129,11 +123,6 @@ with DAG(
             filename=local_path,
         )
         return local_path
-
-    download = PythonOperator(
-        task_id="download_csv",
-        python_callable=download_from_gcs,
-    )
 
     # Write CSV file to Google Sheets
     # GoogleSheetsWriteOperator reads CSV file directly when data is a path
@@ -148,25 +137,29 @@ with DAG(
         pause_between_batches=2.0,
     )
 
-    export_to_gcs >> download >> write_large
+    export_to_gcs >> download_csv() >> write_large
+
+
+bq_to_sheets_overwrite_large()
 
 
 # ---------------------------------------------------------------------------
 # DAG 3: BigQuery → Sheets (smart merge by date)
 # ---------------------------------------------------------------------------
-with DAG(
+@dag(
     dag_id="example_bq_to_sheets_smart_merge",
-    default_args=default_args,
+    start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
     tags=["google-sheets", "bigquery", "example", "smart-merge"],
-) as dag_merge:
-
-    def query_recent_data(**context):
+)
+def bq_to_sheets_smart_merge():
+    @task
+    def fetch_recent_data(**context):
         """Query BigQuery for recent data to merge into Sheets."""
         from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+
         hook = BigQueryHook(gcp_conn_id=GCP_CONN_ID)
-        # Read last 30 days of data
         records = hook.get_records(f"""
             SELECT date, region, revenue, quantity
             FROM `{BQ_PROJECT}.{BQ_DATASET}.{BQ_TABLE}`
@@ -175,11 +168,6 @@ with DAG(
         """)
         columns = ["date", "region", "revenue", "quantity"]
         return [dict(zip(columns, row)) for row in records]
-
-    fetch_recent = PythonOperator(
-        task_id="fetch_recent_data",
-        python_callable=query_recent_data,
-    )
 
     # Smart merge: existing rows with matching date are updated,
     # new dates are appended, dates removed from BQ are deleted from Sheets
@@ -195,4 +183,7 @@ with DAG(
         pause_between_batches=1.0,
     )
 
-    fetch_recent >> merge_to_sheets
+    fetch_recent_data() >> merge_to_sheets
+
+
+bq_to_sheets_smart_merge()
