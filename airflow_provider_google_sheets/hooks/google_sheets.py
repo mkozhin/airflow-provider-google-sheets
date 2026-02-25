@@ -278,6 +278,48 @@ class GoogleSheetsHook(BaseHook):
             .execute()
         )
 
+    def get_sheet_properties(self, spreadsheet_id: str, sheet_name: str | None = None) -> dict:
+        """Return grid properties for a sheet (rowCount, columnCount, etc.).
+
+        When *sheet_name* is ``None``, returns properties of the first sheet.
+        """
+        meta = self.get_spreadsheet_metadata(spreadsheet_id)
+        for sheet in meta.get("sheets", []):
+            if sheet_name is None or sheet["properties"]["title"] == sheet_name:
+                return sheet["properties"]
+        raise GoogleSheetsAPIError(
+            f"Sheet '{sheet_name}' not found in spreadsheet '{spreadsheet_id}'"
+        )
+
+    def ensure_rows(
+        self,
+        spreadsheet_id: str,
+        sheet_name: str | None,
+        required_rows: int,
+    ) -> None:
+        """Expand the sheet grid if it has fewer rows than *required_rows*."""
+        props = self.get_sheet_properties(spreadsheet_id, sheet_name)
+        grid = props.get("gridProperties", {})
+        current_rows = grid.get("rowCount", 0)
+        if current_rows >= required_rows:
+            return
+        sheet_id = props["sheetId"]
+        rows_to_add = required_rows - current_rows
+        logger.info(
+            "Expanding sheet '%s' by %d rows (%d → %d)",
+            sheet_name or "(first)",
+            rows_to_add,
+            current_rows,
+            required_rows,
+        )
+        self.batch_update(spreadsheet_id, [{
+            "appendDimension": {
+                "sheetId": sheet_id,
+                "dimension": "ROWS",
+                "length": rows_to_add,
+            }
+        }])
+
     def get_sheet_id(self, spreadsheet_id: str, sheet_name: str) -> int:
         """Resolve a sheet *name* to its numeric ``sheetId``."""
         meta = self.get_spreadsheet_metadata(spreadsheet_id)

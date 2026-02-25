@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.6
+
+- Fixed `HttpError 400: Range exceeds grid limits` when writing more rows than the sheet contains
+- Added automatic sheet grid expansion — the operator now checks `rowCount` before writing and adds rows via `appendDimension` if needed
+- Added `ensure_rows()` and `get_sheet_properties()` methods to `GoogleSheetsHook`
+
 ## v0.1.5
 
 - Added support for `key_path` / `keyfile_path` authentication — the hook can now read service account credentials from a JSON file on disk

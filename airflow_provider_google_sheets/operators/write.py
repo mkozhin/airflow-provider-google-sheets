@@ -175,6 +175,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
             all_rows.append(headers)
         all_rows.extend(rows)
 
+        # Ensure the sheet has enough rows for all data
+        required_rows = start_row_num + len(all_rows) - 1
+        hook.ensure_rows(self.spreadsheet_id, self.sheet_name, required_rows)
+
         total_written = 0
         for i in range(0, len(all_rows), self.batch_size):
             batch = all_rows[i : i + self.batch_size]
