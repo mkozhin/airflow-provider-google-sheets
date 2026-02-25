@@ -6,7 +6,6 @@ __pycache__
 .env
 /CLAUDE.md
 /PLAN.md
-examples/
 
 # Generated version file
 airflow_provider_google_sheets/_version.py
