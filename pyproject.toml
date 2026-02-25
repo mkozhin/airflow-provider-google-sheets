@@ -40,6 +40,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/mkozhin/airflow-provider-google-sheets"
+Documentation = "https://github.com/mkozhin/airflow-provider-google-sheets#readme"
 Repository = "https://github.com/mkozhin/airflow-provider-google-sheets"
 Changelog = "https://github.com/mkozhin/airflow-provider-google-sheets/blob/main/CHANGELOG.md"
 Issues = "https://github.com/mkozhin/airflow-provider-google-sheets/issues"
