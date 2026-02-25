@@ -130,6 +130,27 @@ class GoogleSheetsWriteOperator(BaseOperator):
     # overwrite
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_range_start(range_str: str) -> tuple[str, int]:
+        """Extract the start column and row from an A1-notation range.
+
+        Examples:
+            ``"B2:D10"`` → ``("B", 2)``
+            ``"Sheet1!C5:F"`` → ``("C", 5)``
+            ``"A1"`` → ``("A", 1)``
+
+        When no row number is present, defaults to ``1``.
+        """
+        r = range_str
+        if "!" in r:
+            r = r.split("!", 1)[1]
+        # Take only the left part (before ':')
+        left = r.split(":")[0]
+        col = "".join(c for c in left if c.isalpha()) or "A"
+        row_str = "".join(c for c in left if c.isdigit())
+        row = int(row_str) if row_str else 1
+        return col, row
+
     def _execute_overwrite(
         self,
         hook: GoogleSheetsHook,
@@ -145,6 +166,9 @@ class GoogleSheetsWriteOperator(BaseOperator):
         logger.info("Clearing range %s", target)
         hook.clear_values(self.spreadsheet_id, target)
 
+        # Determine the start column and row from the target range
+        start_col, start_row_num = self._parse_range_start(target)
+
         # Prepare payload
         all_rows: list[list[Any]] = []
         if self.write_headers and headers:
@@ -154,8 +178,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
         total_written = 0
         for i in range(0, len(all_rows), self.batch_size):
             batch = all_rows[i : i + self.batch_size]
-            start_row = i + 1
-            batch_range = f"{prefix}A{start_row}"
+            row_offset = start_row_num + i
+            batch_range = f"{prefix}{start_col}{row_offset}"
             logger.info("Writing batch of %d rows to %s", len(batch), batch_range)
             hook.update_values(self.spreadsheet_id, batch_range, batch)
             total_written += len(batch)
@@ -289,15 +313,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
                     "num_cols": num_cols,
                 })
             elif incoming_count < existing_count:
-                # Need to delete surplus rows
+                # Need to delete surplus rows — group into contiguous segments
                 rows_to_delete = existing_row_nums[incoming_count:]
-                # Processed bottom-up later
-                structural.append({
-                    "row_num": rows_to_delete[0],
-                    "type": "delete",
-                    "start_index": rows_to_delete[0] - 1,  # 0-based
-                    "end_index": rows_to_delete[-1],        # exclusive in API
-                })
+                for seg_start, seg_end in self._group_contiguous(rows_to_delete):
+                    structural.append({
+                        "row_num": seg_start,
+                        "type": "delete",
+                        "start_index": seg_start - 1,       # 0-based
+                        "end_index": seg_end,                # exclusive in API
+                    })
 
         # Step 5 — Sort structural operations bottom-up (descending row number)
         structural.sort(key=lambda op: op["row_num"], reverse=True)
@@ -354,6 +378,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
             for upd in post_insert_updates:
                 hook.update_values(self.spreadsheet_id, upd["range"], upd["values"])
 
+            # Recalculate row indices in value-updates after structural shifts
+            if updates:
+                self._adjust_row_indices(updates, structural, prefix, num_cols)
+
         # Step 7 — Execute value updates in batches
         if updates:
             logger.info("Updating %d existing rows", len(updates))
@@ -398,6 +426,60 @@ class GoogleSheetsWriteOperator(BaseOperator):
             hook.batch_update(self.spreadsheet_id, batch)
             if i + self.batch_size < len(requests):
                 time.sleep(self.pause_between_batches)
+
+    @staticmethod
+    def _group_contiguous(rows: list[int]) -> list[tuple[int, int]]:
+        """Group sorted row numbers into contiguous segments.
+
+        Each segment is ``(start, end)`` where both are 1-based inclusive.
+
+        Example::
+
+            [3, 7, 8, 12] → [(3, 3), (7, 8), (12, 12)]
+        """
+        if not rows:
+            return []
+        groups: list[tuple[int, int]] = []
+        start = rows[0]
+        prev = rows[0]
+        for r in rows[1:]:
+            if r == prev + 1:
+                prev = r
+            else:
+                groups.append((start, prev))
+                start = r
+                prev = r
+        groups.append((start, prev))
+        return groups
+
+    def _adjust_row_indices(
+        self,
+        updates: list[dict],
+        structural_ops: list[dict],
+        prefix: str,
+        num_cols: int,
+    ) -> None:
+        """Recalculate ``row_num`` in *updates* after structural ops executed bottom-up."""
+        for op in structural_ops:
+            if op["type"] == "insert":
+                inserted_at = op["start_index"]  # 0-based
+                count = op["end_index"] - op["start_index"]
+                for upd in updates:
+                    if upd["row_num"] - 1 >= inserted_at:
+                        upd["row_num"] += count
+            elif op["type"] == "delete":
+                deleted_from = op["start_index"]  # 0-based
+                deleted_to = op["end_index"]       # exclusive, 0-based
+                count = deleted_to - deleted_from
+                for upd in updates:
+                    if upd["row_num"] - 1 >= deleted_to:
+                        upd["row_num"] -= count
+
+        # Rebuild range strings from corrected row_num
+        end_col = self._index_to_column_letter(num_cols - 1)
+        for upd in updates:
+            rn = upd["row_num"]
+            upd["range"] = f"{prefix}A{rn}:{end_col}{rn}"
 
     @staticmethod
     def _index_to_column_letter(index: int) -> str:

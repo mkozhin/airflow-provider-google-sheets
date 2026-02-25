@@ -468,6 +468,242 @@ class TestSmartMerge:
         assert key_range.startswith("MySheet!")
 
 
+# ==================================================================
+# Task 7.1 — Overwrite range mismatch fix
+# ==================================================================
+
+
+class TestOverwriteRangeAlignment:
+    def test_overwrite_with_cell_range_uses_same_start(self, mock_hook, context):
+        """When cell_range='B2:D', both clear and write should use B2."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            cell_range="B2:D",
+            data=[["x", "y", "z"]],
+            has_headers=False,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # Clear should be on B2:D
+        clear_range = mock_hook.clear_values.call_args[0][1]
+        assert "B2:D" in clear_range
+
+        # Write should start at B2, not A1
+        write_range = mock_hook.update_values.call_args[0][1]
+        assert "B2" in write_range
+        assert "A1" not in write_range
+
+    def test_overwrite_without_cell_range_starts_at_a1(self, mock_hook, context):
+        """Default (cell_range=None) writes from A1."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[["x"]],
+            has_headers=False,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        write_range = mock_hook.update_values.call_args[0][1]
+        assert "A1" in write_range
+
+    def test_overwrite_batching_with_cell_range(self, mock_hook, context):
+        """Multiple batches with cell_range='C5:F' continue from correct column."""
+        data = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            cell_range="C5:F",
+            data=data,
+            has_headers=False,
+            batch_size=2,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # 3 rows / batch_size=2 → 2 batches
+        assert mock_hook.update_values.call_count == 2
+        ranges = [c[0][1] for c in mock_hook.update_values.call_args_list]
+        assert "C5" in ranges[0]
+        assert "C7" in ranges[1]
+
+    def test_overwrite_with_sheet_and_cell_range(self, mock_hook, context):
+        """Sheet prefix + cell_range combined correctly."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Data",
+            cell_range="B3:E",
+            write_mode="overwrite",
+            data=[["x"]],
+            has_headers=False,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        write_range = mock_hook.update_values.call_args[0][1]
+        assert write_range.startswith("Data!")
+        assert "B3" in write_range
+
+
+class TestParseRangeStart:
+    def test_simple_range(self):
+        assert GoogleSheetsWriteOperator._parse_range_start("B2:D10") == ("B", 2)
+
+    def test_with_sheet_prefix(self):
+        assert GoogleSheetsWriteOperator._parse_range_start("Sheet1!C5:F") == ("C", 5)
+
+    def test_single_cell(self):
+        assert GoogleSheetsWriteOperator._parse_range_start("A1") == ("A", 1)
+
+    def test_no_row_number(self):
+        assert GoogleSheetsWriteOperator._parse_range_start("B:D") == ("B", 1)
+
+    def test_default_column(self):
+        col, row = GoogleSheetsWriteOperator._parse_range_start("1:100")
+        assert col == "A"
+        assert row == 1
+
+
+# ==================================================================
+# Task 7.2 — Index recalculation after structural ops
+# ==================================================================
+
+
+class TestIndexRecalculation:
+    def _make_op(self, data, merge_key="date", **kwargs):
+        defaults = dict(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key=merge_key,
+            batch_size=1000,
+            pause_between_batches=0,
+        )
+        defaults.update(kwargs)
+        return GoogleSheetsWriteOperator(data=data, **defaults)
+
+    def test_updates_after_insert_are_shifted(self, mock_hook, context):
+        """Insert rows for key A, then update key B which is below — B's row_num
+        must be shifted up by the number of inserted rows."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],      # row 2
+            ["B"],      # row 3
+        ]
+
+        incoming = [
+            {"id": "A", "val": "a1"},
+            {"id": "A", "val": "a2"},  # insert 1 extra row for A
+            {"id": "B", "val": "b_updated"},
+        ]
+        op = self._make_op(incoming, merge_key="id")
+        result = op.execute(context)
+
+        # B was at row 3. After inserting 1 row after row 2, B moved to row 4.
+        # The update for B should target row 4, not row 3.
+        assert result["updated"] >= 2  # A(row2) + B(shifted)
+        assert result["inserted"] == 1
+
+        # Find the update_values call for B — it should be row 4
+        all_update_calls = mock_hook.update_values.call_args_list
+        b_update_ranges = [
+            c[0][1] for c in all_update_calls
+            if c[0][2] == [["B", "b_updated"]]
+        ]
+        assert len(b_update_ranges) == 1
+        assert "4" in b_update_ranges[0]
+
+    def test_updates_after_delete_are_shifted(self, mock_hook, context):
+        """Delete rows for key A, then update key B below — B's row shifts up."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],      # row 2
+            ["A"],      # row 3
+            ["A"],      # row 4
+            ["B"],      # row 5
+        ]
+
+        incoming = [
+            {"id": "A", "val": "a1"},  # 3 existing, 1 incoming → delete 2
+            {"id": "B", "val": "b_updated"},
+        ]
+        op = self._make_op(incoming, merge_key="id")
+        result = op.execute(context)
+
+        assert result["deleted"] == 2
+        # B was at row 5. After deleting 2 rows (rows 3-4), B is at row 3.
+        all_update_calls = mock_hook.update_values.call_args_list
+        b_update_ranges = [
+            c[0][1] for c in all_update_calls
+            if c[0][2] == [["B", "b_updated"]]
+        ]
+        assert len(b_update_ranges) == 1
+        assert "3" in b_update_ranges[0]
+
+
+# ==================================================================
+# Task 7.3 — Non-contiguous row deletion
+# ==================================================================
+
+
+class TestNonContiguousDeletion:
+    def test_group_contiguous_basic(self):
+        f = GoogleSheetsWriteOperator._group_contiguous
+        assert f([3, 7, 8, 12]) == [(3, 3), (7, 8), (12, 12)]
+
+    def test_group_contiguous_all_sequential(self):
+        f = GoogleSheetsWriteOperator._group_contiguous
+        assert f([5, 6, 7]) == [(5, 7)]
+
+    def test_group_contiguous_single(self):
+        f = GoogleSheetsWriteOperator._group_contiguous
+        assert f([10]) == [(10, 10)]
+
+    def test_group_contiguous_empty(self):
+        f = GoogleSheetsWriteOperator._group_contiguous
+        assert f([]) == []
+
+    def test_non_contiguous_rows_deleted_separately(self, mock_hook, context):
+        """Non-contiguous rows for a key should produce separate delete ops,
+        not one big range that destroys intermediate rows."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],      # row 2
+            ["other"],  # row 3 — different key, must NOT be deleted
+            ["A"],      # row 4
+            ["other2"], # row 5 — different key
+            ["A"],      # row 6
+        ]
+
+        # A has 3 rows (2, 4, 6), incoming has 1 → delete 2 surplus
+        incoming = [{"id": "A", "val": "a1"}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="id",
+            data=incoming,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 2
+
+        # Verify that delete operations are for individual rows, not a merged range
+        batch_args = mock_hook.batch_update.call_args[0][1]
+        delete_ops = [r["deleteDimension"]["range"] for r in batch_args if "deleteDimension" in r]
+        # Each delete should be a single row, not a range spanning rows 4-6
+        for dop in delete_ops:
+            span = dop["endIndex"] - dop["startIndex"]
+            assert span == 1, f"Expected single-row delete, got span={span}: {dop}"
+
+
 class TestColumnLetterConversion:
     def test_basic_letters(self):
         f = GoogleSheetsWriteOperator._index_to_column_letter

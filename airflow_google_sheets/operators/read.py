@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import logging
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 from airflow.models import BaseOperator
 
+from airflow_google_sheets.exceptions import GoogleSheetsDataError
 from airflow_google_sheets.hooks.google_sheets import GoogleSheetsHook
-from airflow_google_sheets.utils.data_formats import (
-    rows_to_dicts,
-    write_csv_file,
-    write_json_file,
-)
+from airflow_google_sheets.utils.data_formats import rows_to_dicts
 from airflow_google_sheets.utils.headers import process_headers
 from airflow_google_sheets.utils.schema import apply_schema_to_row, validate_schema
 
@@ -22,9 +21,10 @@ logger = logging.getLogger(__name__)
 class GoogleSheetsReadOperator(BaseOperator):
     """Read data from a Google Sheets spreadsheet.
 
-    Data is read in chunks to handle large sheets without holding the
-    entire dataset in memory at once.  Results can be pushed to XCom or
-    saved to a file (CSV / JSON).
+    Data is read in chunks to handle large sheets.  For ``csv`` / ``json``
+    output the chunks are streamed directly to the file without accumulating
+    the entire dataset in memory.  For ``xcom`` output, rows are collected
+    in memory (subject to *max_xcom_rows* limit).
 
     Args:
         gcp_conn_id: Airflow Connection ID for the Google service account.
@@ -40,6 +40,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         output_type: ``"xcom"``, ``"csv"`` or ``"json"``.
         output_path: File path for ``csv`` / ``json`` output.
         xcom_key: XCom key used when pushing the result.
+        max_xcom_rows: Maximum rows allowed for XCom output.
     """
 
     template_fields: Sequence[str] = (
@@ -64,6 +65,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         output_type: str = "xcom",
         output_path: str | None = None,
         xcom_key: str = "return_value",
+        max_xcom_rows: int = 50_000,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -79,6 +81,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         self.output_type = output_type
         self.output_path = output_path
         self.xcom_key = xcom_key
+        self.max_xcom_rows = max_xcom_rows
 
     # ------------------------------------------------------------------
     # Range helpers
@@ -106,11 +109,9 @@ class GoogleSheetsReadOperator(BaseOperator):
         cols = self._column_letter_from_range(self.cell_range)
         if cols:
             start_col, end_col = cols
-        else:
-            start_col, end_col = "A", ""  # open-ended
-        if end_col:
             return f"{prefix}{start_col}{start_row}:{end_col}{end_row}"
-        return f"{prefix}{start_col}{start_row}:{start_row + self.chunk_size}"
+        # No cell_range → row-only range (all columns)
+        return f"{prefix}{start_row}:{end_row}"
 
     def _build_header_range(self) -> str:
         """Build range for the header row only."""
@@ -120,6 +121,36 @@ class GoogleSheetsReadOperator(BaseOperator):
             start_col, end_col = cols
             return f"{prefix}{start_col}1:{end_col}1"
         return f"{prefix}1:1"
+
+    # ------------------------------------------------------------------
+    # Chunk generator
+    # ------------------------------------------------------------------
+
+    def _read_chunks(
+        self,
+        hook: GoogleSheetsHook,
+        data_start_row: int,
+        headers: list[str] | None,
+    ) -> Iterator[list[list[Any]]]:
+        """Yield rows chunk-by-chunk from the sheet."""
+        current_row = data_start_row
+        while True:
+            end_row = current_row + self.chunk_size - 1
+            chunk_range = self._build_range(current_row, end_row)
+            logger.info("Reading chunk %s", chunk_range)
+
+            rows = hook.get_values(self.spreadsheet_id, chunk_range)
+            if not rows:
+                break
+
+            if self.schema and headers:
+                rows = [apply_schema_to_row(row, headers, self.schema) for row in rows]
+
+            yield rows
+
+            if len(rows) < self.chunk_size:
+                break
+            current_row += self.chunk_size
 
     # ------------------------------------------------------------------
     # execute
@@ -149,56 +180,85 @@ class GoogleSheetsReadOperator(BaseOperator):
         if self.schema and headers:
             validate_schema(headers, self.schema)
 
-        # Step 3 — read data in chunks
+        # Step 3 — dispatch by output type
+        if self.output_type == "csv":
+            return self._stream_to_csv(hook, headers, data_start_row)
+        if self.output_type == "json":
+            return self._stream_to_json(hook, headers, data_start_row)
+        return self._read_to_xcom(hook, headers, data_start_row)
+
+    # ------------------------------------------------------------------
+    # Output strategies
+    # ------------------------------------------------------------------
+
+    def _stream_to_csv(
+        self,
+        hook: GoogleSheetsHook,
+        headers: list[str] | None,
+        data_start_row: int,
+    ) -> str:
+        if not self.output_path:
+            raise ValueError("output_path is required when output_type='csv'")
+
+        total = 0
+        with open(self.output_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            if headers:
+                writer.writerow(headers)
+            for chunk in self._read_chunks(hook, data_start_row, headers):
+                writer.writerows(chunk)
+                total += len(chunk)
+
+        logger.info("Streamed %d rows to CSV %s", total, self.output_path)
+        return self.output_path
+
+    def _stream_to_json(
+        self,
+        hook: GoogleSheetsHook,
+        headers: list[str] | None,
+        data_start_row: int,
+    ) -> str:
+        if not self.output_path:
+            raise ValueError("output_path is required when output_type='json'")
+
+        total = 0
+        with open(self.output_path, "w", encoding="utf-8") as f:
+            f.write("[\n")
+            first = True
+            for chunk in self._read_chunks(hook, data_start_row, headers):
+                for row in chunk:
+                    if not first:
+                        f.write(",\n")
+                    first = False
+                    if headers:
+                        obj = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
+                        json.dump(obj, f, ensure_ascii=False, default=str)
+                    else:
+                        json.dump(row, f, ensure_ascii=False, default=str)
+                    total += 1
+            f.write("\n]")
+
+        logger.info("Streamed %d rows to JSON %s", total, self.output_path)
+        return self.output_path
+
+    def _read_to_xcom(
+        self,
+        hook: GoogleSheetsHook,
+        headers: list[str] | None,
+        data_start_row: int,
+    ) -> Any:
         all_rows: list[list[Any]] = []
-        current_row = data_start_row
-
-        while True:
-            end_row = current_row + self.chunk_size - 1
-            chunk_range = self._build_range(current_row, end_row)
-            logger.info("Reading chunk %s", chunk_range)
-
-            rows = hook.get_values(self.spreadsheet_id, chunk_range)
-            if not rows:
-                break
-
-            # Step 4 — apply schema conversion
-            if self.schema and headers:
-                rows = [apply_schema_to_row(row, headers, self.schema) for row in rows]
-
-            all_rows.extend(rows)
-            logger.info("Read %d rows (total so far: %d)", len(rows), len(all_rows))
-
-            if len(rows) < self.chunk_size:
-                break  # last chunk
-            current_row += self.chunk_size
+        for chunk in self._read_chunks(hook, data_start_row, headers):
+            all_rows.extend(chunk)
+            if len(all_rows) > self.max_xcom_rows:
+                raise GoogleSheetsDataError(
+                    f"Row count ({len(all_rows)}) exceeds max_xcom_rows "
+                    f"({self.max_xcom_rows}). Use output_type='csv' or "
+                    f"'json' for large datasets."
+                )
 
         logger.info("Finished reading. Total rows: %d", len(all_rows))
 
-        # Step 5 — output
-        return self._save_output(headers, all_rows, context)
-
-    def _save_output(
-        self,
-        headers: list[str] | None,
-        rows: list[list[Any]],
-        context: Any,
-    ) -> Any:
-        if self.output_type == "csv":
-            if not self.output_path:
-                raise ValueError("output_path is required when output_type='csv'")
-            write_csv_file(self.output_path, headers, rows)
-            logger.info("Saved %d rows to %s", len(rows), self.output_path)
-            return self.output_path
-
-        if self.output_type == "json":
-            if not self.output_path:
-                raise ValueError("output_path is required when output_type='json'")
-            write_json_file(self.output_path, headers, rows)
-            logger.info("Saved %d rows to %s", len(rows), self.output_path)
-            return self.output_path
-
-        # xcom (default)
         if headers:
-            return rows_to_dicts(rows, headers)
-        return rows
+            return rows_to_dicts(all_rows, headers)
+        return all_rows

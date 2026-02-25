@@ -372,3 +372,162 @@ class TestOutputTypes:
         )
         result = op.execute(context)
         assert result == [["a", "b"], ["c", "d"]]
+
+
+# ------------------------------------------------------------------
+# Task 7.4 — Streaming output
+# ------------------------------------------------------------------
+
+
+class TestStreamingOutput:
+    def test_csv_streaming_multiple_chunks(self, mock_hook, context, tmp_dir):
+        """CSV output streams chunks directly to file without accumulating."""
+        mock_hook.get_values.side_effect = [
+            [["a", "b"]],                     # headers
+            [["1", "2"], ["3", "4"]],          # chunk 1 (chunk_size=2)
+            [["5", "6"]],                      # chunk 2 (< chunk_size → done)
+        ]
+
+        path = os.path.join(tmp_dir, "stream.csv")
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            chunk_size=2,
+            output_type="csv",
+            output_path=path,
+        )
+        result = op.execute(context)
+
+        assert result == path
+        with open(path) as f:
+            lines = f.readlines()
+        assert len(lines) == 4  # header + 3 data rows
+        assert lines[0].strip() == "a,b"
+        assert lines[3].strip() == "5,6"
+
+    def test_json_streaming_multiple_chunks(self, mock_hook, context, tmp_dir):
+        """JSON output streams chunks directly to file."""
+        mock_hook.get_values.side_effect = [
+            [["x"]],                # headers
+            [["1"], ["2"]],         # chunk 1
+            [["3"]],               # chunk 2
+        ]
+
+        path = os.path.join(tmp_dir, "stream.json")
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            chunk_size=2,
+            output_type="json",
+            output_path=path,
+        )
+        result = op.execute(context)
+
+        assert result == path
+        with open(path) as f:
+            data = json.load(f)
+        assert data == [{"x": "1"}, {"x": "2"}, {"x": "3"}]
+
+    def test_json_streaming_without_headers(self, mock_hook, context, tmp_dir):
+        """JSON without headers outputs list of lists."""
+        mock_hook.get_values.side_effect = [
+            [["a", "b"], ["c", "d"]],
+        ]
+
+        path = os.path.join(tmp_dir, "stream_noheader.json")
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=False,
+            output_type="json",
+            output_path=path,
+        )
+        result = op.execute(context)
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data == [["a", "b"], ["c", "d"]]
+
+    def test_xcom_max_rows_exceeded(self, mock_hook, context):
+        """XCom output raises when exceeding max_xcom_rows."""
+        mock_hook.get_values.side_effect = [
+            [["col"]],                         # headers
+            [["r"] for _ in range(10)],        # 10 rows
+        ]
+
+        from airflow_google_sheets.exceptions import GoogleSheetsDataError
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            max_xcom_rows=5,
+        )
+        with pytest.raises(GoogleSheetsDataError, match="max_xcom_rows"):
+            op.execute(context)
+
+    def test_xcom_within_limit_works(self, mock_hook, context):
+        """XCom output works normally within the limit."""
+        mock_hook.get_values.side_effect = [
+            [["col"]],
+            [["a"], ["b"], ["c"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            max_xcom_rows=100,
+        )
+        result = op.execute(context)
+        assert len(result) == 3
+
+
+# ------------------------------------------------------------------
+# Range building fix (cell_range=None)
+# ------------------------------------------------------------------
+
+
+class TestRangeBuildingFix:
+    def test_build_range_no_cell_range(self):
+        """When cell_range=None, _build_range should produce row-only range."""
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id="sid",
+            cell_range=None,
+        )
+        result = op._build_range(2, 5001)
+        # Should be "2:5001" (no column letters)
+        assert result == "2:5001"
+        # Should NOT contain something like "A2:5001" (invalid)
+        assert "A2:" not in result or "A2:5001" not in result
+
+    def test_build_range_no_cell_range_with_sheet(self):
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id="sid",
+            cell_range=None,
+            sheet_name="Sheet1",
+        )
+        result = op._build_range(2, 5001)
+        assert result == "Sheet1!2:5001"
+
+    def test_build_range_with_cell_range(self):
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id="sid",
+            cell_range="B1:D",
+        )
+        result = op._build_range(2, 5001)
+        assert result == "B2:D5001"
+
+    def test_build_header_range_no_cell_range(self):
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id="sid",
+            cell_range=None,
+        )
+        result = op._build_header_range()
+        assert result == "1:1"
