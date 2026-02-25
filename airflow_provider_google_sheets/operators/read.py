@@ -35,6 +35,9 @@ class GoogleSheetsReadOperator(BaseOperator):
         has_headers: Whether the first row contains column headers.
         transliterate_headers: Transliterate Cyrillic headers to Latin.
         normalize_headers: Sanitize headers to ``snake_case``.
+        column_mapping: Optional dict mapping original header names to new names.
+            Applied after transliteration/normalization.  Headers not present
+            in the mapping are kept as-is.
         schema: Optional column type schema for validation and conversion.
         chunk_size: Number of rows to read per API request.
         output_type: ``"xcom"``, ``"csv"`` or ``"json"``.
@@ -60,6 +63,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         has_headers: bool = True,
         transliterate_headers: bool = False,
         normalize_headers: bool = False,
+        column_mapping: dict[str, str] | None = None,
         schema: dict[str, dict] | None = None,
         chunk_size: int = 5000,
         output_type: str = "xcom",
@@ -76,6 +80,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         self.has_headers = has_headers
         self.transliterate_headers = transliterate_headers
         self.normalize_headers = normalize_headers
+        self.column_mapping = column_mapping
         self.schema = schema
         self.chunk_size = chunk_size
         self.output_type = output_type
@@ -173,6 +178,8 @@ class GoogleSheetsReadOperator(BaseOperator):
                     transliterate=self.transliterate_headers,
                     normalize=self.normalize_headers,
                 )
+                if self.column_mapping:
+                    headers = [self.column_mapping.get(h, h) for h in headers]
                 logger.info("Headers: %s", headers)
             data_start_row = 2
 

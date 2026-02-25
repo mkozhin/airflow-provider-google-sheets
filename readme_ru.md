@@ -93,6 +93,7 @@ read_typed = GoogleSheetsReadOperator(
 | `has_headers` | bool | `True` | Первая строка содержит заголовки |
 | `transliterate_headers` | bool | `False` | Транслитерировать кириллицу в латиницу |
 | `normalize_headers` | bool | `False` | Нормализовать в snake_case |
+| `column_mapping` | dict | `None` | Переименование заголовков: `{"Исходный": "new_name"}` |
 | `schema` | dict | `None` | Схема типов столбцов |
 | `chunk_size` | int | `5000` | Строк за один API-запрос |
 | `output_type` | str | `"xcom"` | `"xcom"`, `"csv"` или `"json"` |

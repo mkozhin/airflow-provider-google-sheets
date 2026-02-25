@@ -113,6 +113,7 @@ read_typed = GoogleSheetsReadOperator(
 | `has_headers` | bool | `True` | First row contains headers |
 | `transliterate_headers` | bool | `False` | Transliterate Cyrillic to Latin |
 | `normalize_headers` | bool | `False` | Normalize to snake_case |
+| `column_mapping` | dict | `None` | Rename headers: `{"Original": "new_name"}` |
 | `schema` | dict | `None` | Column type schema |
 | `chunk_size` | int | `5000` | Rows per API request |
 | `output_type` | str | `"xcom"` | `"xcom"`, `"csv"`, or `"json"` |

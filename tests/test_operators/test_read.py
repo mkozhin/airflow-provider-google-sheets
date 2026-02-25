@@ -235,6 +235,38 @@ class TestHeaderProcessing:
         result = op.execute(context)
         assert list(result[0].keys()) == ["my_column", "another_one"]
 
+    def test_column_mapping(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["Дата", "Клиент", "Сумма"]],
+            [["2026-01-01", "ФСК", "100"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            column_mapping={"Дата": "date", "Клиент": "client", "Сумма": "amount"},
+        )
+        result = op.execute(context)
+        assert list(result[0].keys()) == ["date", "client", "amount"]
+        assert result[0] == {"date": "2026-01-01", "client": "ФСК", "amount": "100"}
+
+    def test_column_mapping_partial(self, mock_hook, context):
+        """Headers not in mapping are kept as-is."""
+        mock_hook.get_values.side_effect = [
+            [["Дата", "value"]],
+            [["2026-01-01", "42"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            column_mapping={"Дата": "date"},
+        )
+        result = op.execute(context)
+        assert list(result[0].keys()) == ["date", "value"]
+
     def test_duplicate_headers(self, mock_hook, context):
         mock_hook.get_values.side_effect = [
             [["Col", "Col", "Col"]],

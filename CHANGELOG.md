@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.8
+
+- Added `column_mapping` parameter to `GoogleSheetsReadOperator` — rename headers on read via a dict (e.g. Cyrillic → Latin), applied after transliteration/normalization
+
 ## v0.1.7
 
 - Changed JSON output format from JSON array to JSONL (newline-delimited JSON) — each line is a separate JSON object, compatible with BigQuery and other tools that expect NDJSON
