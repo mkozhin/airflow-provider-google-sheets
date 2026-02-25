@@ -6,7 +6,7 @@ import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from airflow_google_sheets.utils.retry import is_retryable_http_error, retry_with_backoff
+from airflow_provider_google_sheets.utils.retry import is_retryable_http_error, retry_with_backoff
 
 
 def _make_http_error(status: int) -> HttpError:
@@ -38,7 +38,7 @@ class TestIsRetryableHttpError:
 
 
 class TestRetryWithBackoff:
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_succeeds_on_first_attempt(self, mock_sleep):
         @retry_with_backoff(max_retries=3)
         def func():
@@ -47,7 +47,7 @@ class TestRetryWithBackoff:
         assert func() == "ok"
         mock_sleep.assert_not_called()
 
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_retries_on_429_then_succeeds(self, mock_sleep):
         call_count = 0
 
@@ -63,7 +63,7 @@ class TestRetryWithBackoff:
         assert call_count == 3
         assert mock_sleep.call_count == 2
 
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_raises_after_max_retries(self, mock_sleep):
         @retry_with_backoff(max_retries=2, base_delay=1.0, jitter=False)
         def func():
@@ -73,7 +73,7 @@ class TestRetryWithBackoff:
             func()
         assert mock_sleep.call_count == 2
 
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_no_retry_on_400(self, mock_sleep):
         @retry_with_backoff(max_retries=3)
         def func():
@@ -83,7 +83,7 @@ class TestRetryWithBackoff:
             func()
         mock_sleep.assert_not_called()
 
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_no_retry_on_403(self, mock_sleep):
         @retry_with_backoff(max_retries=3)
         def func():
@@ -93,7 +93,7 @@ class TestRetryWithBackoff:
             func()
         mock_sleep.assert_not_called()
 
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_exponential_backoff_delay(self, mock_sleep):
         call_count = 0
 
@@ -109,7 +109,7 @@ class TestRetryWithBackoff:
         delays = [call.args[0] for call in mock_sleep.call_args_list]
         assert delays == [1.0, 2.0, 4.0]
 
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_delay_capped_at_max_delay(self, mock_sleep):
         call_count = 0
 
@@ -126,7 +126,7 @@ class TestRetryWithBackoff:
         # base_delay * 2^attempt: 10, 20, 30(capped), 30(capped), 30(capped)
         assert delays == [10.0, 20.0, 30.0, 30.0, 30.0]
 
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_retries_custom_exception(self, mock_sleep):
         call_count = 0
 
@@ -141,7 +141,7 @@ class TestRetryWithBackoff:
         assert func() == "ok"
         assert call_count == 2
 
-    @patch("airflow_google_sheets.utils.retry.time.sleep")
+    @patch("airflow_provider_google_sheets.utils.retry.time.sleep")
     def test_no_retry_on_non_retryable_exception(self, mock_sleep):
         @retry_with_backoff(max_retries=3)
         def func():

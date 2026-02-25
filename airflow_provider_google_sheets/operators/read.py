@@ -9,11 +9,11 @@ from typing import Any, Iterator, Sequence
 
 from airflow.models import BaseOperator
 
-from airflow_google_sheets.exceptions import GoogleSheetsDataError
-from airflow_google_sheets.hooks.google_sheets import GoogleSheetsHook
-from airflow_google_sheets.utils.data_formats import rows_to_dicts
-from airflow_google_sheets.utils.headers import process_headers
-from airflow_google_sheets.utils.schema import apply_schema_to_row, validate_schema
+from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError
+from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
+from airflow_provider_google_sheets.utils.data_formats import rows_to_dicts
+from airflow_provider_google_sheets.utils.headers import process_headers
+from airflow_provider_google_sheets.utils.schema import apply_schema_to_row, validate_schema
 
 logger = logging.getLogger(__name__)
 

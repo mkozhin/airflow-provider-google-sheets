@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from airflow_google_sheets.exceptions import GoogleSheetsAuthError, GoogleSheetsAPIError
-from airflow_google_sheets.hooks.google_sheets import GoogleSheetsHook
+from airflow_provider_google_sheets.exceptions import GoogleSheetsAuthError, GoogleSheetsAPIError
+from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 
 
 SPREADSHEET_ID = "test-spreadsheet-id"
@@ -42,8 +42,8 @@ def mock_service():
 def hook(mock_connection, mock_service):
     """Create a GoogleSheetsHook with mocked connection and service."""
     with patch.object(GoogleSheetsHook, "get_connection", return_value=mock_connection), \
-         patch("airflow_google_sheets.hooks.google_sheets.Credentials") as mock_creds_cls, \
-         patch("airflow_google_sheets.hooks.google_sheets.build", return_value=mock_service):
+         patch("airflow_provider_google_sheets.hooks.google_sheets.Credentials") as mock_creds_cls, \
+         patch("airflow_provider_google_sheets.hooks.google_sheets.build", return_value=mock_service):
         mock_creds_cls.from_service_account_info.return_value = MagicMock()
         h = GoogleSheetsHook(gcp_conn_id="test_conn")
         h.get_conn()  # trigger build
@@ -51,8 +51,8 @@ def hook(mock_connection, mock_service):
 
 
 class TestAuthentication:
-    @patch("airflow_google_sheets.hooks.google_sheets.build")
-    @patch("airflow_google_sheets.hooks.google_sheets.Credentials")
+    @patch("airflow_provider_google_sheets.hooks.google_sheets.build")
+    @patch("airflow_provider_google_sheets.hooks.google_sheets.Credentials")
     def test_auth_with_valid_credentials(self, mock_creds_cls, mock_build, mock_connection):
         mock_creds_cls.from_service_account_info.return_value = MagicMock()
         mock_build.return_value = MagicMock()
@@ -74,8 +74,8 @@ class TestAuthentication:
             with pytest.raises(GoogleSheetsAuthError, match="Failed to authenticate"):
                 hook.get_conn()
 
-    @patch("airflow_google_sheets.hooks.google_sheets.build")
-    @patch("airflow_google_sheets.hooks.google_sheets.Credentials")
+    @patch("airflow_provider_google_sheets.hooks.google_sheets.build")
+    @patch("airflow_provider_google_sheets.hooks.google_sheets.Credentials")
     def test_auth_with_raw_json_extra(self, mock_creds_cls, mock_build):
         """When extra IS the keyfile dict directly (no nested keyfile_dict key)."""
         conn = MagicMock()
@@ -91,8 +91,8 @@ class TestAuthentication:
         call_args = mock_creds_cls.from_service_account_info.call_args
         assert call_args[0][0]["project_id"] == "test-project"
 
-    @patch("airflow_google_sheets.hooks.google_sheets.build")
-    @patch("airflow_google_sheets.hooks.google_sheets.Credentials")
+    @patch("airflow_provider_google_sheets.hooks.google_sheets.build")
+    @patch("airflow_provider_google_sheets.hooks.google_sheets.Credentials")
     def test_service_is_cached(self, mock_creds_cls, mock_build, mock_connection):
         mock_creds_cls.from_service_account_info.return_value = MagicMock()
         mock_build.return_value = MagicMock()

@@ -1,0 +1,4 @@
+include LICENSE
+include readme.md
+include CHANGELOG.md
+recursive-include airflow_provider_google_sheets *.py

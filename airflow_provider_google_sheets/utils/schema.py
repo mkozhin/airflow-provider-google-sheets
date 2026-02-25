@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from airflow_google_sheets.exceptions import GoogleSheetsDataError, GoogleSheetsSchemaError
+from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError, GoogleSheetsSchemaError
 
 # Supported type names
 _SUPPORTED_TYPES = {"str", "int", "float", "date", "datetime", "bool"}

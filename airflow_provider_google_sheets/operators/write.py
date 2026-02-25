@@ -9,9 +9,9 @@ from typing import Any, Sequence
 
 from airflow.models import BaseOperator
 
-from airflow_google_sheets.hooks.google_sheets import GoogleSheetsHook
-from airflow_google_sheets.utils.data_formats import normalize_input_data
-from airflow_google_sheets.utils.schema import format_row_for_write
+from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
+from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
+from airflow_provider_google_sheets.utils.schema import format_row_for_write
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +373,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
                         post_insert_updates.append({
                             "range": f"{prefix}A{row_num}:{end_col}{row_num}",
                             "values": [row_data],
+                            "row_num": row_num,
+                            "_source_op": id(op),
                         })
                     stats["inserted"] += len(op["values"])
 
@@ -381,9 +383,19 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 logger.info("Executing %d structural operations", len(batch_requests))
                 self._batched_batch_update(hook, batch_requests)
 
-            # Write values into newly inserted rows
+            # Recalculate post_insert_updates indices after structural shifts
+            if post_insert_updates and len(structural) > 1:
+                self._adjust_post_insert_indices(
+                    post_insert_updates, structural, prefix
+                )
+
+            # Write values into newly inserted rows (strip internal fields)
             if post_insert_updates:
-                hook.batch_update_values(self.spreadsheet_id, post_insert_updates)
+                clean_data = [
+                    {"range": u["range"], "values": u["values"]}
+                    for u in post_insert_updates
+                ]
+                hook.batch_update_values(self.spreadsheet_id, clean_data)
 
             # Recalculate row indices in value-updates after structural shifts
             if updates:
@@ -485,6 +497,49 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # Rebuild range strings from corrected row_num
         end_col = self._index_to_column_letter(num_cols - 1)
         for upd in updates:
+            rn = upd["row_num"]
+            upd["range"] = f"{prefix}A{rn}:{end_col}{rn}"
+
+    def _adjust_post_insert_indices(
+        self,
+        post_insert_updates: list[dict],
+        structural_ops: list[dict],
+        prefix: str,
+    ) -> None:
+        """Recalculate row indices in *post_insert_updates* after structural ops.
+
+        Structural ops are sorted bottom-up (descending row_num) and executed
+        in that order.  Each post_insert_update must only be adjusted by ops
+        that execute **after** its parent op — i.e., ops that appear later in
+        the bottom-up list (lower row_num).
+        """
+        # Build a mapping: source_op id → index in structural_ops list
+        op_index_map: dict[int, int] = {
+            id(op): idx for idx, op in enumerate(structural_ops)
+        }
+
+        for upd in post_insert_updates:
+            source_idx = op_index_map.get(upd.get("_source_op", -1), -1)
+            # Only apply ops that come after source_idx in the list
+            for later_idx in range(source_idx + 1, len(structural_ops)):
+                op = structural_ops[later_idx]
+                if op["type"] == "insert":
+                    inserted_at = op["start_index"]
+                    count = op["end_index"] - op["start_index"]
+                    if upd["row_num"] - 1 >= inserted_at:
+                        upd["row_num"] += count
+                elif op["type"] == "delete":
+                    deleted_to = op["end_index"]
+                    count = deleted_to - op["start_index"]
+                    if upd["row_num"] - 1 >= deleted_to:
+                        upd["row_num"] -= count
+
+        # Rebuild range strings from corrected row_num
+        for upd in post_insert_updates:
+            range_str = upd["range"]
+            colon_idx = range_str.index(":")
+            end_part = range_str[colon_idx + 1:]
+            end_col = "".join(c for c in end_part if c.isalpha())
             rn = upd["row_num"]
             upd["range"] = f"{prefix}A{rn}:{end_col}{rn}"
 

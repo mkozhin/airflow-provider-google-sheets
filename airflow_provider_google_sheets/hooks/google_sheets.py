@@ -11,8 +11,8 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError
 
-from airflow_google_sheets.exceptions import GoogleSheetsAuthError, GoogleSheetsAPIError
-from airflow_google_sheets.utils.retry import retry_with_backoff
+from airflow_provider_google_sheets.exceptions import GoogleSheetsAuthError, GoogleSheetsAPIError
+from airflow_provider_google_sheets.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 

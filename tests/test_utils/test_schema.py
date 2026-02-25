@@ -4,8 +4,8 @@ from datetime import date, datetime
 
 import pytest
 
-from airflow_google_sheets.exceptions import GoogleSheetsDataError, GoogleSheetsSchemaError
-from airflow_google_sheets.utils.schema import (
+from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError, GoogleSheetsSchemaError
+from airflow_provider_google_sheets.utils.schema import (
     apply_schema_to_row,
     apply_schema_to_value,
     format_row_for_write,

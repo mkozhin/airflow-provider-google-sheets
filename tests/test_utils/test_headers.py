@@ -2,7 +2,7 @@
 
 import pytest
 
-from airflow_google_sheets.utils.headers import (
+from airflow_provider_google_sheets.utils.headers import (
     process_headers,
     sanitize_header,
     _deduplicate,

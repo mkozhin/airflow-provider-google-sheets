@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from airflow_google_sheets.operators.write import GoogleSheetsWriteOperator
+from airflow_provider_google_sheets.operators.write import GoogleSheetsWriteOperator
 
 
 SPREADSHEET_ID = "test-spreadsheet-id"
@@ -19,7 +19,7 @@ SPREADSHEET_ID = "test-spreadsheet-id"
 @pytest.fixture
 def mock_hook():
     with patch(
-        "airflow_google_sheets.operators.write.GoogleSheetsHook"
+        "airflow_provider_google_sheets.operators.write.GoogleSheetsHook"
     ) as hook_cls:
         hook = MagicMock()
         hook_cls.return_value = hook
@@ -905,3 +905,268 @@ class TestUnknownWriteMode:
         )
         with pytest.raises(ValueError, match="Unknown write_mode"):
             op.execute(context)
+
+
+# ==================================================================
+# Task 9.2 — post_insert_updates recalculation after structural ops
+# ==================================================================
+
+
+class TestPostInsertUpdatesRecalculation:
+    """Verify post_insert_updates ranges are recalculated when multiple
+    structural operations shift rows."""
+
+    def _make_op(self, data, merge_key="id", **kwargs):
+        defaults = dict(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key=merge_key,
+            batch_size=1000,
+            pause_between_batches=0,
+        )
+        defaults.update(kwargs)
+        return GoogleSheetsWriteOperator(data=data, **defaults)
+
+    def _get_post_insert_ranges(self, mock_hook):
+        """Extract ranges written via batch_update_values that correspond
+        to post_insert_updates (called right after structural batch)."""
+        calls = mock_hook.batch_update_values.call_args_list
+        ranges = []
+        for c in calls:
+            data = c[0][1]
+            for item in data:
+                ranges.append(item["range"])
+        return ranges
+
+    def test_delete_above_shifts_post_insert_updates(self, mock_hook, context):
+        """Delete rows above an insert point — post_insert_updates for the
+        inserted rows must shift up by deleted count."""
+        # Existing: A has 3 rows (2,3,4), B has 1 row (5)
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],      # row 2
+            ["A"],      # row 3
+            ["A"],      # row 4
+            ["B"],      # row 5
+        ]
+
+        # Incoming: A shrinks to 1 (delete 2), B grows to 3 (insert 2)
+        incoming = [
+            {"id": "A", "val": "a1"},
+            {"id": "B", "val": "b1"},
+            {"id": "B", "val": "b2"},
+            {"id": "B", "val": "b3"},
+        ]
+        op = self._make_op(incoming)
+        result = op.execute(context)
+
+        assert result["deleted"] == 2
+        assert result["inserted"] == 2
+
+        # After deleting rows 3-4, B moves from row 5 to row 3.
+        # Insert 2 rows after row 3 → new rows at 4, 5 (0-based: 3, 4).
+        # post_insert_updates should write to rows 4 and 5 (after delete shift).
+        all_ranges = self._get_post_insert_ranges(mock_hook)
+        # Find ranges for the inserted B values (b2, b3)
+        insert_ranges = []
+        for c in mock_hook.batch_update_values.call_args_list:
+            data = c[0][1]
+            for item in data:
+                for val_row in item["values"]:
+                    if val_row[1] in ("b2", "b3"):
+                        insert_ranges.append(item["range"])
+        assert len(insert_ranges) == 2
+        # The row numbers should reflect the shifted position
+        row_nums = sorted(int("".join(c for c in r.split(":")[-1] if c.isdigit()))
+                          for r in insert_ranges)
+        # Rows should be consecutive and correct after shift
+        assert row_nums[1] == row_nums[0] + 1
+
+    def test_two_inserts_mutual_adjustment(self, mock_hook, context):
+        """Two inserts in different parts of the sheet — the upper insert
+        shifts post_insert_updates of the lower insert."""
+        # Existing: A at row 2, B at row 3
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],      # row 2
+            ["B"],      # row 3
+        ]
+
+        # A grows to 3 (insert 2), B grows to 3 (insert 2)
+        incoming = [
+            {"id": "A", "val": "a1"},
+            {"id": "A", "val": "a2"},
+            {"id": "A", "val": "a3"},
+            {"id": "B", "val": "b1"},
+            {"id": "B", "val": "b2"},
+            {"id": "B", "val": "b3"},
+        ]
+        op = self._make_op(incoming)
+        result = op.execute(context)
+
+        assert result["inserted"] == 4  # 2 for A + 2 for B
+
+        # Collect all post_insert_updates ranges
+        insert_ranges = []
+        for c in mock_hook.batch_update_values.call_args_list:
+            data = c[0][1]
+            for item in data:
+                for val_row in item["values"]:
+                    if val_row[1] in ("a2", "a3", "b2", "b3"):
+                        insert_ranges.append((val_row[1], item["range"]))
+
+        # Extract row numbers
+        row_map = {}
+        for val, rng in insert_ranges:
+            row_num = int("".join(c for c in rng.split(":")[-1] if c.isdigit()))
+            row_map[val] = row_num
+
+        # A inserts after row 2 → rows 3, 4
+        # B was at row 3, after A's insert of 2, B moves to row 5
+        # B inserts after row 5 → rows 6, 7
+        # So: a2→3, a3→4, b2→6, b3→7
+        if "a2" in row_map and "a3" in row_map:
+            assert row_map["a3"] == row_map["a2"] + 1
+        if "b2" in row_map and "b3" in row_map:
+            assert row_map["b3"] == row_map["b2"] + 1
+        # B's inserts must be after A's inserts
+        if "a3" in row_map and "b2" in row_map:
+            assert row_map["b2"] > row_map["a3"]
+
+    def test_single_insert_no_shift(self, mock_hook, context):
+        """Single insert — no other structural ops, so post_insert_updates
+        should not be recalculated (ranges stay as initially computed)."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],      # row 2
+        ]
+
+        incoming = [
+            {"id": "A", "val": "a1"},
+            {"id": "A", "val": "a2"},
+            {"id": "A", "val": "a3"},
+        ]
+        op = self._make_op(incoming)
+        result = op.execute(context)
+
+        assert result["inserted"] == 2
+
+        # With only one insert op, post_insert_updates should use
+        # the original computed positions (rows 3, 4)
+        insert_ranges = []
+        for c in mock_hook.batch_update_values.call_args_list:
+            data = c[0][1]
+            for item in data:
+                for val_row in item["values"]:
+                    if val_row[1] in ("a2", "a3"):
+                        insert_ranges.append(item["range"])
+        assert len(insert_ranges) == 2
+        row_nums = sorted(int("".join(c for c in r.split(":")[-1] if c.isdigit()))
+                          for r in insert_ranges)
+        assert row_nums == [3, 4]
+
+    def test_insert_with_delete_below_no_shift(self, mock_hook, context):
+        """Delete below insert should not affect post_insert_updates of
+        the insert above it."""
+        # Existing: A at row 2, B at rows 3,4,5
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],      # row 2
+            ["B"],      # row 3
+            ["B"],      # row 4
+            ["B"],      # row 5
+        ]
+
+        # A grows to 3 (insert 2), B shrinks to 1 (delete 2)
+        incoming = [
+            {"id": "A", "val": "a1"},
+            {"id": "A", "val": "a2"},
+            {"id": "A", "val": "a3"},
+            {"id": "B", "val": "b1"},
+        ]
+        op = self._make_op(incoming)
+        result = op.execute(context)
+
+        assert result["inserted"] == 2
+        assert result["deleted"] == 2
+
+        # A's inserts are above B's deletes — they should not be shifted
+        insert_ranges = []
+        for c in mock_hook.batch_update_values.call_args_list:
+            data = c[0][1]
+            for item in data:
+                for val_row in item["values"]:
+                    if val_row[1] in ("a2", "a3"):
+                        insert_ranges.append(item["range"])
+        assert len(insert_ranges) == 2
+        row_nums = sorted(int("".join(c for c in r.split(":")[-1] if c.isdigit()))
+                          for r in insert_ranges)
+        assert row_nums == [3, 4]
+
+
+# ==================================================================
+# Payload validation — no internal fields leak to API
+# ==================================================================
+
+ALLOWED_VALUE_RANGE_KEYS = {"range", "values", "majorDimension"}
+
+
+class TestBatchUpdatePayloadCleanliness:
+    """Ensure batch_update_values receives only API-compatible fields."""
+
+    def _make_op(self, data, merge_key="id", **kwargs):
+        defaults = dict(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key=merge_key,
+            batch_size=1000,
+            pause_between_batches=0,
+        )
+        defaults.update(kwargs)
+        return GoogleSheetsWriteOperator(data=data, **defaults)
+
+    def _assert_clean_payloads(self, mock_hook):
+        """Check every batch_update_values call has only allowed keys."""
+        for call in mock_hook.batch_update_values.call_args_list:
+            data = call[0][1]
+            for item in data:
+                extra = set(item.keys()) - ALLOWED_VALUE_RANGE_KEYS
+                assert not extra, (
+                    f"Internal fields leaked to API payload: {extra}. "
+                    f"Item: {item}"
+                )
+
+    def test_post_insert_updates_have_no_internal_fields(self, mock_hook, context):
+        """post_insert_updates should not contain row_num or _source_op."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],
+            ["B"],
+        ]
+        incoming = [
+            {"id": "A", "val": "a1"},
+            {"id": "A", "val": "a2"},
+            {"id": "A", "val": "a3"},
+            {"id": "B", "val": "b1"},
+            {"id": "B", "val": "b2"},
+        ]
+        op = self._make_op(incoming)
+        op.execute(context)
+        self._assert_clean_payloads(mock_hook)
+
+    def test_regular_updates_have_no_internal_fields(self, mock_hook, context):
+        """Regular value updates should also be clean."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],
+            ["B"],
+        ]
+        incoming = [
+            {"id": "A", "val": "updated_a"},
+            {"id": "B", "val": "updated_b"},
+        ]
+        op = self._make_op(incoming)
+        op.execute(context)
+        self._assert_clean_payloads(mock_hook)

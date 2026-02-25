@@ -7,7 +7,7 @@ from typing import Any, Sequence
 
 from airflow.models import BaseOperator
 
-from airflow_google_sheets.hooks.google_sheets import GoogleSheetsHook
+from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 
 logger = logging.getLogger(__name__)
 

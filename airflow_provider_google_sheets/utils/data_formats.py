@@ -8,7 +8,7 @@ import logging
 import os
 from typing import Any
 
-from airflow_google_sheets.exceptions import GoogleSheetsDataError
+from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError
 
 logger = logging.getLogger(__name__)
 

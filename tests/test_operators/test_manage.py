@@ -8,7 +8,7 @@ import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from airflow_google_sheets.operators.manage import (
+from airflow_provider_google_sheets.operators.manage import (
     GoogleSheetsCreateSheetOperator,
     GoogleSheetsCreateSpreadsheetOperator,
 )
@@ -20,7 +20,7 @@ SPREADSHEET_ID = "test-spreadsheet-id"
 @pytest.fixture
 def mock_hook():
     with patch(
-        "airflow_google_sheets.operators.manage.GoogleSheetsHook"
+        "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
     ) as hook_cls:
         hook = MagicMock()
         hook_cls.return_value = hook
@@ -148,7 +148,7 @@ class TestCreateSheet:
         mock_hook.create_sheet.return_value = {"replies": [{}]}
 
         with patch(
-            "airflow_google_sheets.operators.manage.GoogleSheetsHook"
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
         ) as hook_cls:
             hook_cls.return_value = mock_hook
             op = GoogleSheetsCreateSheetOperator(

@@ -6,8 +6,8 @@ import tempfile
 
 import pytest
 
-from airflow_google_sheets.exceptions import GoogleSheetsDataError
-from airflow_google_sheets.utils.data_formats import (
+from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError
+from airflow_provider_google_sheets.utils.data_formats import (
     dicts_to_rows,
     normalize_input_data,
     read_csv_file,

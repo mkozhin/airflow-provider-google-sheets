@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from airflow_google_sheets.operators.read import GoogleSheetsReadOperator
+from airflow_provider_google_sheets.operators.read import GoogleSheetsReadOperator
 
 
 SPREADSHEET_ID = "test-spreadsheet-id"
@@ -19,7 +19,7 @@ SPREADSHEET_ID = "test-spreadsheet-id"
 @pytest.fixture
 def mock_hook():
     with patch(
-        "airflow_google_sheets.operators.read.GoogleSheetsHook"
+        "airflow_provider_google_sheets.operators.read.GoogleSheetsHook"
     ) as hook_cls:
         hook = MagicMock()
         hook_cls.return_value = hook
@@ -288,7 +288,7 @@ class TestSchemaApplication:
             schema={"date": {"type": "date", "required": True}},
         )
 
-        from airflow_google_sheets.exceptions import GoogleSheetsSchemaError
+        from airflow_provider_google_sheets.exceptions import GoogleSheetsSchemaError
         with pytest.raises(GoogleSheetsSchemaError):
             op.execute(context)
 
@@ -457,7 +457,7 @@ class TestStreamingOutput:
             [["r"] for _ in range(10)],        # 10 rows
         ]
 
-        from airflow_google_sheets.exceptions import GoogleSheetsDataError
+        from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError
 
         op = GoogleSheetsReadOperator(
             task_id="test",
