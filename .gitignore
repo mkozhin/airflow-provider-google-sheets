@@ -1,0 +1,15 @@
+.idea
+.venv
+.ipynb_checkpoints
+__pycache__
+**/.env
+.env
+/CLAUDE.md
+/PLAN.md
+examples/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+/.claude/

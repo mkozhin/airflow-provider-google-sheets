@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airflow-provider-google-sheets"
+version = "0.1.0"
+description = "Apache Airflow provider for Google Sheets"
+requires-python = "==3.10.*"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "apache-airflow==2.9.1",
+    "google-api-python-client>=2.0",
+    "google-auth>=2.0",
+]
+
+[project.optional-dependencies]
+transliterate = ["transliterate"]
+dev = [
+    "pytest>=7.0",
+    "pytest-mock>=3.0",
+]
+
+[project.entry-points."apache_airflow_provider"]
+provider_info = "airflow_google_sheets:get_provider_info"
+
+[tool.setuptools.packages.find]
+include = ["airflow_google_sheets*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
