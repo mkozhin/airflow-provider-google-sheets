@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.5
+
+- Added support for `key_path` / `keyfile_path` authentication — the hook can now read service account credentials from a JSON file on disk
+- Added support for custom scopes from the `scope` field in connection extra
+- Full compatibility with standard `Google Cloud` connection type (Keyfile Path, Keyfile JSON, Scopes)
+- Refactored example DAGs to use `@dag` and `@task` decorators (TaskFlow API)
+- Updated README with detailed connection setup options
+
 ## v0.1.4
 
 - Added `Documentation` and `Issues` URLs to package metadata for PyPI sidebar

@@ -22,12 +22,17 @@ SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 class GoogleSheetsHook(BaseHook):
     """Hook for Google Sheets API v4.
 
-    Authenticates via a Google service account whose JSON key is stored
-    in an Airflow Connection (``conn_type='google_sheets'``).
+    Authenticates via a Google service account. Compatible with both
+    ``google_sheets`` and standard ``google_cloud_platform`` connections.
 
-    The service-account JSON can be provided in:
-    - The ``keyfile_dict`` field inside Connection *extra*, **or**
-    - The entire Connection *extra* field as the raw JSON key.
+    Supported credential sources (checked in order):
+    1. ``key_path`` / ``keyfile_path`` in Connection *extra* — path to a
+       service-account JSON file on disk.
+    2. ``keyfile_dict`` in Connection *extra* — inline service-account JSON.
+    3. The entire Connection *extra* field as the raw service-account JSON.
+
+    If ``scope`` is set in Connection *extra*, it overrides the default
+    Sheets-only scope.
 
     Args:
         gcp_conn_id: Airflow Connection ID.
@@ -54,14 +59,26 @@ class GoogleSheetsHook(BaseHook):
         connection = self.get_connection(self.gcp_conn_id)
         try:
             extra = connection.extra_dejson
-            keyfile_dict = extra.get("keyfile_dict", extra)
-            if isinstance(keyfile_dict, str):
-                keyfile_dict = json.loads(keyfile_dict)
+            key_path = extra.get("key_path") or extra.get("keyfile_path")
+            scopes = SHEETS_SCOPES
+            extra_scopes = extra.get("scope")
+            if extra_scopes:
+                scopes = [s.strip() for s in extra_scopes.split(",")]
 
-            credentials = Credentials.from_service_account_info(
-                keyfile_dict,
-                scopes=SHEETS_SCOPES,
-            )
+            if key_path:
+                credentials = Credentials.from_service_account_file(
+                    key_path,
+                    scopes=scopes,
+                )
+            else:
+                keyfile_dict = extra.get("keyfile_dict", extra)
+                if isinstance(keyfile_dict, str):
+                    keyfile_dict = json.loads(keyfile_dict)
+
+                credentials = Credentials.from_service_account_info(
+                    keyfile_dict,
+                    scopes=scopes,
+                )
         except Exception as e:
             raise GoogleSheetsAuthError(
                 f"Failed to authenticate with Google Sheets API using connection "

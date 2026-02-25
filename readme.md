@@ -40,10 +40,30 @@ pip install airflow-provider-google-sheets[transliterate]
 
 1. Create a Google Cloud service account with **Google Sheets API** enabled.
 2. Download the JSON key file.
-3. In Airflow UI, create a connection:
-   - **Conn Id**: `google_cloud_default`
-   - **Conn Type**: `google_sheets`
-   - **Extra**: paste the full JSON key, or use `{"keyfile_dict": <JSON key>}`
+3. In Airflow UI, create a connection with one of the supported configurations:
+
+### Option A: Standard Google Cloud connection (recommended)
+
+Use this if you already have a `google_cloud_platform` connection configured in Airflow.
+
+- **Conn Id**: `google_cloud_default`
+- **Conn Type**: `Google Cloud`
+- **Keyfile Path**: `/path/to/service-account.json`
+- **Scopes**: `https://www.googleapis.com/auth/spreadsheets` (add more if needed)
+
+### Option B: Inline JSON key
+
+- **Conn Id**: `google_cloud_default`
+- **Conn Type**: `Google Cloud` or `google_sheets`
+- **Keyfile JSON**: paste the full service account JSON
+
+### Option C: JSON in Extra field
+
+- **Conn Id**: `google_cloud_default`
+- **Conn Type**: `google_sheets`
+- **Extra**: paste the full JSON key, or use `{"keyfile_dict": <JSON key>}`
+
+The hook checks credentials in this order: `key_path` / `keyfile_path` (file on disk) → `keyfile_dict` (inline JSON) → raw Extra JSON.
 
 ## Operators
 
