@@ -119,14 +119,19 @@ def dicts_to_rows(
 ) -> tuple[list[str], list[list[Any]]]:
     """Convert a list of dicts to ``(headers, rows)``.
 
-    If *headers* is ``None``, keys are collected from the first dict
-    preserving insertion order.
+    If *headers* is ``None``, keys are collected as a union of all dicts'
+    keys, preserving the order of first appearance.
     """
     if not data:
         return headers or [], []
 
     if headers is None:
-        headers = list(data[0].keys())
+        seen: dict[str, bool] = {}
+        for d in data:
+            for key in d:
+                if key not in seen:
+                    seen[key] = True
+        headers = list(seen.keys())
 
     rows: list[list[Any]] = []
     for d in data:

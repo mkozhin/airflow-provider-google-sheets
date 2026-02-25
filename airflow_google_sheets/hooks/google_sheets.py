@@ -185,6 +185,32 @@ class GoogleSheetsHook(BaseHook):
         )
 
     @retry_with_backoff()
+    def batch_update_values(
+        self,
+        spreadsheet_id: str,
+        data: list[dict],
+        value_input_option: str = "USER_ENTERED",
+    ) -> dict:
+        """Update multiple ranges in a single request via ``values.batchUpdate``.
+
+        Args:
+            spreadsheet_id: Target spreadsheet.
+            data: List of ``{"range": "...", "values": [[...]]}`` dicts.
+            value_input_option: How to interpret input data.
+        """
+        body = {
+            "valueInputOption": value_input_option,
+            "data": data,
+        }
+        return (
+            self.get_conn()
+            .spreadsheets()
+            .values()
+            .batchUpdate(spreadsheetId=spreadsheet_id, body=body)
+            .execute()
+        )
+
+    @retry_with_backoff()
     def batch_update(self, spreadsheet_id: str, requests: list[dict]) -> dict:
         """Execute a batch of spreadsheet update requests (insert/delete rows, etc.)."""
         body = {"requests": requests}

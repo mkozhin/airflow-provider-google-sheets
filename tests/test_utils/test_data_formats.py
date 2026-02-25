@@ -192,6 +192,34 @@ class TestDictsToRows:
         assert headers == []
         assert rows == []
 
+    def test_union_keys_from_all_dicts(self):
+        """Headers should be union of all dicts' keys, not just first."""
+        data = [{"a": 1}, {"a": 2, "b": 3}]
+        headers, rows = dicts_to_rows(data)
+        assert headers == ["a", "b"]
+        assert rows == [[1, None], [2, 3]]
+
+    def test_union_keys_preserves_order(self):
+        """Keys appear in order of first occurrence across all dicts."""
+        data = [{"b": 1}, {"a": 2}]
+        headers, rows = dicts_to_rows(data)
+        assert headers == ["b", "a"]
+        assert rows == [[1, None], [None, 2]]
+
+    def test_union_keys_all_same(self):
+        """When all dicts have same keys, behavior unchanged."""
+        data = [{"x": 1, "y": 2}, {"x": 3, "y": 4}]
+        headers, rows = dicts_to_rows(data)
+        assert headers == ["x", "y"]
+        assert rows == [[1, 2], [3, 4]]
+
+    def test_union_keys_with_empty_dicts(self):
+        """Empty dicts in the list should not break anything."""
+        data = [{"a": 1}, {}, {"b": 2}]
+        headers, rows = dicts_to_rows(data)
+        assert headers == ["a", "b"]
+        assert rows == [[1, None], [None, None], [None, 2]]
+
 
 # ---------------------------------------------------------------------------
 # normalize_input_data

@@ -606,18 +606,19 @@ class TestIndexRecalculation:
         result = op.execute(context)
 
         # B was at row 3. After inserting 1 row after row 2, B moved to row 4.
-        # The update for B should target row 4, not row 3.
         assert result["updated"] >= 2  # A(row2) + B(shifted)
         assert result["inserted"] == 1
 
-        # Find the update_values call for B — it should be row 4
-        all_update_calls = mock_hook.update_values.call_args_list
-        b_update_ranges = [
-            c[0][1] for c in all_update_calls
-            if c[0][2] == [["B", "b_updated"]]
-        ]
-        assert len(b_update_ranges) == 1
-        assert "4" in b_update_ranges[0]
+        # batch_update_values is used now — find the call with B's data
+        all_batch_calls = mock_hook.batch_update_values.call_args_list
+        b_ranges = []
+        for c in all_batch_calls:
+            data = c[0][1]  # list of {"range": ..., "values": ...}
+            for item in data:
+                if item["values"] == [["B", "b_updated"]]:
+                    b_ranges.append(item["range"])
+        assert len(b_ranges) == 1
+        assert "4" in b_ranges[0]
 
     def test_updates_after_delete_are_shifted(self, mock_hook, context):
         """Delete rows for key A, then update key B below — B's row shifts up."""
@@ -638,13 +639,15 @@ class TestIndexRecalculation:
 
         assert result["deleted"] == 2
         # B was at row 5. After deleting 2 rows (rows 3-4), B is at row 3.
-        all_update_calls = mock_hook.update_values.call_args_list
-        b_update_ranges = [
-            c[0][1] for c in all_update_calls
-            if c[0][2] == [["B", "b_updated"]]
-        ]
-        assert len(b_update_ranges) == 1
-        assert "3" in b_update_ranges[0]
+        all_batch_calls = mock_hook.batch_update_values.call_args_list
+        b_ranges = []
+        for c in all_batch_calls:
+            data = c[0][1]
+            for item in data:
+                if item["values"] == [["B", "b_updated"]]:
+                    b_ranges.append(item["range"])
+        assert len(b_ranges) == 1
+        assert "3" in b_ranges[0]
 
 
 # ==================================================================
@@ -702,6 +705,174 @@ class TestNonContiguousDeletion:
         for dop in delete_ops:
             span = dop["endIndex"] - dop["startIndex"]
             assert span == 1, f"Expected single-row delete, got span={span}: {dop}"
+
+
+# ==================================================================
+# Task 8.2 — Deterministic key ordering
+# ==================================================================
+
+
+class TestDeterministicKeyOrder:
+    def test_keys_processed_in_stable_order(self, mock_hook, context):
+        """Keys should be processed in stable order: existing first, then new."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["C"],   # row 2
+            ["A"],   # row 3
+            ["B"],   # row 4
+        ]
+
+        incoming = [
+            {"id": "B", "val": "b1"},
+            {"id": "A", "val": "a1"},
+            {"id": "D", "val": "d1"},  # new key
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="id",
+            data=incoming,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        # Should work without error and produce deterministic results
+        assert result["updated"] == 2  # A and B
+        assert result["appended"] == 1  # D
+
+
+# ==================================================================
+# Task 8.3 — Batch update values
+# ==================================================================
+
+
+class TestBatchUpdateValuesUsage:
+    def test_smart_merge_uses_batch_update_values(self, mock_hook, context):
+        """Value updates should use batch_update_values, not individual update_values."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],   # row 2
+            ["B"],   # row 3
+            ["C"],   # row 4
+        ]
+
+        incoming = [
+            {"id": "A", "val": "a1"},
+            {"id": "B", "val": "b1"},
+            {"id": "C", "val": "c1"},
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="id",
+            data=incoming,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["updated"] == 3
+        # batch_update_values should be called (not individual update_values for merge)
+        mock_hook.batch_update_values.assert_called()
+        # All 3 updates in a single batch call
+        batch_data = mock_hook.batch_update_values.call_args[0][1]
+        assert len(batch_data) == 3
+
+    def test_batch_update_values_respects_batch_size(self, mock_hook, context):
+        """When updates exceed batch_size, multiple batch_update_values calls are made."""
+        mock_hook.get_values.return_value = [
+            ["id"],
+            ["A"],
+            ["B"],
+            ["C"],
+        ]
+
+        incoming = [
+            {"id": "A", "val": "a"},
+            {"id": "B", "val": "b"},
+            {"id": "C", "val": "c"},
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="id",
+            data=incoming,
+            batch_size=2,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["updated"] == 3
+        # 3 updates / batch_size=2 → 2 batch_update_values calls
+        assert mock_hook.batch_update_values.call_count == 2
+
+
+# ==================================================================
+# Task 8.4 — has_headers in smart merge
+# ==================================================================
+
+
+class TestSmartMergeHasHeaders:
+    def test_has_headers_false_processes_row1_as_data(self, mock_hook, context):
+        """When has_headers=False, row 1 is data, not a header to skip."""
+        mock_hook.get_values.return_value = [
+            ["A"],   # row 1 — data, NOT header
+            ["B"],   # row 2
+        ]
+
+        incoming = [
+            {"id": "A", "val": "a_updated"},
+            {"id": "B", "val": "b_updated"},
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="id",
+            data=incoming,
+            has_headers=False,
+            pause_between_batches=0,
+        )
+        # has_headers=False but smart_merge needs headers from data → dicts provide them
+        result = op.execute(context)
+
+        assert result["updated"] == 2
+        # Verify row 1 was indexed (not skipped)
+        batch_data = mock_hook.batch_update_values.call_args[0][1]
+        ranges = [item["range"] for item in batch_data]
+        # Row 1 (A) and row 2 (B) should both be updated
+        row_nums = []
+        for r in ranges:
+            # Extract row number from range like "A1:B1"
+            parts = r.split(":")
+            row_nums.append(int("".join(c for c in parts[0] if c.isdigit())))
+        assert 1 in row_nums  # row 1 must be included
+        assert 2 in row_nums
+
+    def test_has_headers_true_skips_row1(self, mock_hook, context):
+        """When has_headers=True (default), row 1 is skipped as header."""
+        mock_hook.get_values.return_value = [
+            ["id"],   # row 1 — header
+            ["A"],    # row 2
+        ]
+
+        incoming = [{"id": "A", "val": "updated"}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="id",
+            data=incoming,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["updated"] == 1
+        # Update should target row 2, not row 1
+        batch_data = mock_hook.batch_update_values.call_args[0][1]
+        assert "2" in batch_data[0]["range"]
 
 
 class TestColumnLetterConversion:

@@ -246,10 +246,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
         logger.info("Reading key column from %s", key_range)
         existing_keys_raw = hook.get_values(self.spreadsheet_id, key_range)
 
-        # Build index: {key_value: [row_numbers]} (1-based, row 1 = header)
+        # Build index: {key_value: [row_numbers]} (1-based)
         existing_index: dict[str, list[int]] = defaultdict(list)
-        # Skip header row (row 1)
-        for row_num, row in enumerate(existing_keys_raw[1:], start=2):
+        if self.has_headers:
+            data_rows = existing_keys_raw[1:]
+            start_row_num = 2
+        else:
+            data_rows = existing_keys_raw
+            start_row_num = 1
+        for row_num, row in enumerate(data_rows, start=start_row_num):
             if row:
                 key_val = str(row[0])
                 existing_index[key_val].append(row_num)
@@ -269,8 +274,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
         structural: list[dict] = []       # insert/delete dimension requests
         append_rows: list[list[Any]] = [] # rows to append at the end
 
-        # Collect all keys and process
-        all_keys = set(list(existing_index.keys()) + list(incoming_groups.keys()))
+        # Collect all keys in stable order (existing first, then new)
+        all_keys = list(dict.fromkeys(
+            list(existing_index.keys()) + list(incoming_groups.keys())
+        ))
 
         for key_val in all_keys:
             existing_row_nums = existing_index.get(key_val, [])
@@ -375,20 +382,20 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 self._batched_batch_update(hook, batch_requests)
 
             # Write values into newly inserted rows
-            for upd in post_insert_updates:
-                hook.update_values(self.spreadsheet_id, upd["range"], upd["values"])
+            if post_insert_updates:
+                hook.batch_update_values(self.spreadsheet_id, post_insert_updates)
 
             # Recalculate row indices in value-updates after structural shifts
             if updates:
                 self._adjust_row_indices(updates, structural, prefix, num_cols)
 
-        # Step 7 — Execute value updates in batches
+        # Step 7 — Execute value updates in batches via batchUpdate
         if updates:
             logger.info("Updating %d existing rows", len(updates))
             for i in range(0, len(updates), self.batch_size):
                 batch = updates[i : i + self.batch_size]
-                for upd in batch:
-                    hook.update_values(self.spreadsheet_id, upd["range"], upd["values"])
+                batch_data = [{"range": u["range"], "values": u["values"]} for u in batch]
+                hook.batch_update_values(self.spreadsheet_id, batch_data)
                 stats["updated"] += len(batch)
                 if i + self.batch_size < len(updates):
                     time.sleep(self.pause_between_batches)

@@ -160,6 +160,20 @@ class TestClearValues:
         assert result == {"clearedRange": RANGE}
 
 
+class TestBatchUpdateValues:
+    def test_batch_update_values_calls_api(self, hook, mock_service):
+        data = [
+            {"range": "A1:B1", "values": [["x", "y"]]},
+            {"range": "A2:B2", "values": [["a", "b"]]},
+        ]
+        mock_service.spreadsheets().values().batchUpdate().execute.return_value = {
+            "totalUpdatedCells": 4
+        }
+
+        result = hook.batch_update_values(SPREADSHEET_ID, data)
+        assert result == {"totalUpdatedCells": 4}
+
+
 class TestBatchUpdate:
     def test_batch_update_calls_api(self, hook, mock_service):
         requests = [{"addSheet": {"properties": {"title": "New"}}}]
