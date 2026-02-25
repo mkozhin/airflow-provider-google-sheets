@@ -1,12 +1,25 @@
 # Changelog
 
+## v0.1.4
+
+- Added `Documentation` and `Issues` URLs to package metadata for PyPI sidebar
+- Added `project-url` to `get_provider_info()` for Airflow providers page link
+- Fixed typo in Documentation URL in `pyproject.toml`
+
 ## v0.1.3
 
+- Renamed package from `airflow_google_sheets` to `airflow_provider_google_sheets`
 - Fixed `post_insert_updates` index recalculation after structural operations in smart merge
 - Added `_adjust_post_insert_indices()` method that correctly skips parent operations
 - Fixed internal fields (`row_num`, `_source_op`) leaking into `batch_update_values` API payload
 - Added payload cleanliness tests
-- Renamed package from `airflow_google_sheets` to `airflow_provider_google_sheets`
+- Expanded `get_provider_info()` with integrations, operators, hooks metadata
+- Switched to `setuptools-scm` for automatic versioning from git tags
+- Relaxed dependencies: Python >= 3.10, Apache Airflow >= 2.7 < 3.0
+- Changed license from Apache-2.0 to MIT
+- Added `readme.md` (EN), `readme_ru.md` (RU), `CHANGELOG.md`, `LICENSE`
+- Added example DAGs including BigQuery integration
+- Added GitHub Actions workflow for testing and publishing to PyPI
 
 ## v0.1.2
 
