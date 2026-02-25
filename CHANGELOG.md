@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.7
+
+- Changed JSON output format from JSON array to JSONL (newline-delimited JSON) — each line is a separate JSON object, compatible with BigQuery and other tools that expect NDJSON
+
 ## v0.1.6
 
 - Fixed `HttpError 400: Range exceeds grid limits` when writing more rows than the sheet contains

@@ -88,8 +88,7 @@ def write_json_file(
     headers: list[str] | None,
     rows: list[list[Any]],
 ) -> None:
-    """Write data to a JSON file as a list of dicts (when headers are available)
-    or a list of lists otherwise."""
+    """Write data to a JSON file as newline-delimited JSON (one JSON object per line)."""
     try:
         if headers:
             data = rows_to_dicts(rows, headers)
@@ -97,7 +96,9 @@ def write_json_file(
             data = rows
 
         with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+            for item in data:
+                json.dump(item, f, ensure_ascii=False, default=str)
+                f.write("\n")
     except Exception as e:
         raise GoogleSheetsDataError(f"Failed to write JSON file '{file_path}': {e}") from e
 

@@ -143,7 +143,7 @@ class TestWriteJsonFile:
         write_json_file(path, ["a", "b"], [[1, 2], [3, 4]])
 
         with open(path) as f:
-            data = json.load(f)
+            data = [json.loads(line) for line in f if line.strip()]
         assert data == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
 
     def test_write_without_headers(self, tmp_dir):
@@ -151,7 +151,7 @@ class TestWriteJsonFile:
         write_json_file(path, None, [[1, 2], [3, 4]])
 
         with open(path) as f:
-            data = json.load(f)
+            data = [json.loads(line) for line in f if line.strip()]
         assert data == [[1, 2], [3, 4]]
 
 

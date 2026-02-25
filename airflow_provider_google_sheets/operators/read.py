@@ -223,20 +223,15 @@ class GoogleSheetsReadOperator(BaseOperator):
 
         total = 0
         with open(self.output_path, "w", encoding="utf-8") as f:
-            f.write("[\n")
-            first = True
             for chunk in self._read_chunks(hook, data_start_row, headers):
                 for row in chunk:
-                    if not first:
-                        f.write(",\n")
-                    first = False
                     if headers:
                         obj = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
                         json.dump(obj, f, ensure_ascii=False, default=str)
                     else:
                         json.dump(row, f, ensure_ascii=False, default=str)
+                    f.write("\n")
                     total += 1
-            f.write("\n]")
 
         logger.info("Streamed %d rows to JSON %s", total, self.output_path)
         return self.output_path

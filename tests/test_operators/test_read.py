@@ -340,7 +340,7 @@ class TestOutputTypes:
 
         assert result == path
         with open(path) as f:
-            data = json.load(f)
+            data = [json.loads(line) for line in f if line.strip()]
         assert data == [{"a": "1", "b": "2"}]
 
     def test_output_csv_requires_path(self, mock_hook, context):
@@ -427,7 +427,7 @@ class TestStreamingOutput:
 
         assert result == path
         with open(path) as f:
-            data = json.load(f)
+            data = [json.loads(line) for line in f if line.strip()]
         assert data == [{"x": "1"}, {"x": "2"}, {"x": "3"}]
 
     def test_json_streaming_without_headers(self, mock_hook, context, tmp_dir):
@@ -447,7 +447,7 @@ class TestStreamingOutput:
         result = op.execute(context)
 
         with open(path) as f:
-            data = json.load(f)
+            data = [json.loads(line) for line in f if line.strip()]
         assert data == [["a", "b"], ["c", "d"]]
 
     def test_xcom_max_rows_exceeded(self, mock_hook, context):
