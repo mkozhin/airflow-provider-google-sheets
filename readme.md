@@ -16,7 +16,7 @@ Apache Airflow provider for Google Sheets API v4. Read, write, and manage Google
 - **Manage** spreadsheets — create new spreadsheets and sheets
 - **Large datasets** — streaming read/write without loading everything into memory
 - **Schema support** — automatic type conversion (date, int, float, bool) on read and write
-- **Header processing** — deduplication, Cyrillic transliteration, snake_case normalization
+- **Header processing** — deduplication, Cyrillic transliteration (on by default), special character removal, lowercase conversion, snake_case normalization
 
 ## Installation
 
@@ -101,17 +101,34 @@ read_typed = GoogleSheetsReadOperator(
     },
 )
 
-# Rename Cyrillic headers to Latin via column_mapping
+# Default behavior: headers are transliterated, sanitized, and lowercased.
+# "Дата отчёта" → "data_otchyota", "Клиент (ФИО)" → "klient_fio"
+read_default = GoogleSheetsReadOperator(
+    task_id="read_default",
+    spreadsheet_id="your-spreadsheet-id",
+)
+
+# column_mapping takes priority — all other header processing is skipped,
+# mapping keys use the original raw header names from the spreadsheet.
 read_mapped = GoogleSheetsReadOperator(
     task_id="read_mapped",
     spreadsheet_id="your-spreadsheet-id",
     output_type="json",
     output_path="/tmp/export.json",
     column_mapping={
-        "Дата": "date",
+        "Дата": "report_date",
         "Клиент": "client",
         "Сумма": "amount",
     },
+)
+
+# Disable all header processing to keep original names
+read_raw = GoogleSheetsReadOperator(
+    task_id="read_raw",
+    spreadsheet_id="your-spreadsheet-id",
+    transliterate_headers=False,
+    sanitize_headers=False,
+    lowercase_headers=False,
 )
 ```
 
@@ -124,9 +141,11 @@ read_mapped = GoogleSheetsReadOperator(
 | `sheet_name` | str | `None` | Sheet name (None = first sheet) |
 | `cell_range` | str | `None` | A1-notation range (None = entire sheet) |
 | `has_headers` | bool | `True` | First row contains headers |
-| `transliterate_headers` | bool | `False` | Transliterate Cyrillic to Latin |
-| `normalize_headers` | bool | `False` | Normalize to snake_case |
-| `column_mapping` | dict | `None` | Rename headers: `{"Original": "new_name"}` |
+| `transliterate_headers` | bool | `True` | Transliterate Cyrillic to Latin |
+| `sanitize_headers` | bool | `True` | Remove spaces and special characters (keep letters, digits, `_`) |
+| `lowercase_headers` | bool | `True` | Convert headers to lowercase |
+| `normalize_headers` | bool | `False` | Normalize to snake_case (overrides `sanitize` + `lowercase`) |
+| `column_mapping` | dict | `None` | Rename headers using raw names: `{"Original": "new_name"}`. Skips all other processing |
 | `schema` | dict | `None` | Column type schema |
 | `chunk_size` | int | `5000` | Rows per API request |
 | `output_type` | str | `"xcom"` | `"xcom"`, `"csv"`, or `"json"` |

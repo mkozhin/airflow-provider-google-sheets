@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.9
+
+- **Breaking:** `transliterate_headers` default changed from `False` to `True` — Cyrillic headers are now transliterated to Latin by default
+- Added `sanitize_headers` parameter (default `True`) — removes spaces and special characters from header names, keeping only letters, digits, and underscores
+- Added `lowercase_headers` parameter (default `True`) — converts header names to lowercase
+- When `normalize_headers=True`, `sanitize_headers` and `lowercase_headers` are ignored (normalize already includes both)
+- `column_mapping` now takes priority over all header processing — when provided, transliteration, sanitization, and lowercasing are skipped; the mapping is applied directly to raw header names from the spreadsheet
+
 ## v0.1.8
 
 - Added `column_mapping` parameter to `GoogleSheetsReadOperator` — rename headers on read via a dict (e.g. Cyrillic → Latin), applied after transliteration/normalization

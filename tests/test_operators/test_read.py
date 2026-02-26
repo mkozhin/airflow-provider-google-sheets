@@ -57,9 +57,10 @@ class TestBasicRead:
         )
         result = op.execute(context)
 
+        # Default settings: transliterate=True, sanitize=True, lowercase=True
         assert result == [
-            {"Name": "Alice", "Age": "30"},
-            {"Name": "Bob", "Age": "25"},
+            {"name": "Alice", "age": "30"},
+            {"name": "Bob", "age": "25"},
         ]
 
     def test_read_without_headers(self, mock_hook, context):
@@ -128,8 +129,8 @@ class TestChunkedRead:
         result = op.execute(context)
 
         assert len(result) == 5
-        assert result[0] == {"Col": "r1"}
-        assert result[4] == {"Col": "r5"}
+        assert result[0] == {"col": "r1"}
+        assert result[4] == {"col": "r5"}
 
     def test_exact_chunk_size_triggers_next_read(self, mock_hook, context):
         """When a chunk returns exactly chunk_size rows, the operator
@@ -220,6 +221,23 @@ class TestHeaderProcessing:
         for key in result[0]:
             assert key.isascii(), f"Non-ASCII key: {key}"
 
+    def test_transliterate_headers_disabled(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["Дата", "Выручка"]],
+            [["01.01", "100"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+        )
+        result = op.execute(context)
+        assert list(result[0].keys()) == ["Дата", "Выручка"]
+
     def test_normalize_headers(self, mock_hook, context):
         mock_hook.get_values.side_effect = [
             [["My Column", "Another One"]],
@@ -235,7 +253,76 @@ class TestHeaderProcessing:
         result = op.execute(context)
         assert list(result[0].keys()) == ["my_column", "another_one"]
 
+    def test_sanitize_headers(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["My Column!", "Price ($)"]],
+            [["a", "b"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            transliterate_headers=False,
+            sanitize_headers=True,
+            lowercase_headers=False,
+        )
+        result = op.execute(context)
+        assert list(result[0].keys()) == ["My_Column", "Price"]
+
+    def test_sanitize_headers_disabled(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["My Column!", "Price ($)"]],
+            [["a", "b"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+        )
+        result = op.execute(context)
+        assert list(result[0].keys()) == ["My Column!", "Price ($)"]
+
+    def test_lowercase_headers(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["Name", "AGE"]],
+            [["a", "b"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=True,
+        )
+        result = op.execute(context)
+        assert list(result[0].keys()) == ["name", "age"]
+
+    def test_lowercase_headers_disabled(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["Name", "AGE"]],
+            [["a", "b"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+        )
+        result = op.execute(context)
+        assert list(result[0].keys()) == ["Name", "AGE"]
+
     def test_column_mapping(self, mock_hook, context):
+        """column_mapping skips all header processing and maps raw names."""
         mock_hook.get_values.side_effect = [
             [["Дата", "Клиент", "Сумма"]],
             [["2026-01-01", "ФСК", "100"]],
@@ -252,7 +339,7 @@ class TestHeaderProcessing:
         assert result[0] == {"date": "2026-01-01", "client": "ФСК", "amount": "100"}
 
     def test_column_mapping_partial(self, mock_hook, context):
-        """Headers not in mapping are kept as-is."""
+        """Headers not in mapping are kept as raw originals."""
         mock_hook.get_values.side_effect = [
             [["Дата", "value"]],
             [["2026-01-01", "42"]],
@@ -267,6 +354,29 @@ class TestHeaderProcessing:
         result = op.execute(context)
         assert list(result[0].keys()) == ["date", "value"]
 
+    def test_column_mapping_ignores_processing_flags(self, mock_hook, context):
+        """Even with transliterate/sanitize/lowercase on, column_mapping
+        receives raw header names because it takes priority."""
+        mock_hook.get_values.side_effect = [
+            [["Дата Отчёта", "Клиент (ФИО)"]],
+            [["2026-01-01", "Иванов"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            transliterate_headers=True,
+            sanitize_headers=True,
+            lowercase_headers=True,
+            column_mapping={
+                "Дата Отчёта": "report_date",
+                "Клиент (ФИО)": "client_name",
+            },
+        )
+        result = op.execute(context)
+        assert list(result[0].keys()) == ["report_date", "client_name"]
+
     def test_duplicate_headers(self, mock_hook, context):
         mock_hook.get_values.side_effect = [
             [["Col", "Col", "Col"]],
@@ -280,7 +390,8 @@ class TestHeaderProcessing:
         )
         result = op.execute(context)
         keys = list(result[0].keys())
-        assert keys == ["Col", "Col_1", "Col_2"]
+        # With default lowercase=True
+        assert keys == ["col", "col_1", "col_2"]
 
 
 # ------------------------------------------------------------------

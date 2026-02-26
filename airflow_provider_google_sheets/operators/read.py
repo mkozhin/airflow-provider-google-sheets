@@ -34,9 +34,15 @@ class GoogleSheetsReadOperator(BaseOperator):
             entire sheet.
         has_headers: Whether the first row contains column headers.
         transliterate_headers: Transliterate Cyrillic headers to Latin.
+            Defaults to ``True``.
         normalize_headers: Sanitize headers to ``snake_case``.
+        sanitize_headers: Remove spaces and special characters from headers,
+            keeping only letters, digits, and underscores.  Defaults to ``True``.
+        lowercase_headers: Convert headers to lowercase.  Defaults to ``True``.
         column_mapping: Optional dict mapping original header names to new names.
-            Applied after transliteration/normalization.  Headers not present
+            When provided, all other header processing (transliterate, sanitize,
+            lowercase, normalize) is skipped — the mapping is applied directly
+            to the raw header names from the spreadsheet.  Headers not present
             in the mapping are kept as-is.
         schema: Optional column type schema for validation and conversion.
         chunk_size: Number of rows to read per API request.
@@ -61,8 +67,10 @@ class GoogleSheetsReadOperator(BaseOperator):
         sheet_name: str | None = None,
         cell_range: str | None = None,
         has_headers: bool = True,
-        transliterate_headers: bool = False,
+        transliterate_headers: bool = True,
         normalize_headers: bool = False,
+        sanitize_headers: bool = True,
+        lowercase_headers: bool = True,
         column_mapping: dict[str, str] | None = None,
         schema: dict[str, dict] | None = None,
         chunk_size: int = 5000,
@@ -80,6 +88,8 @@ class GoogleSheetsReadOperator(BaseOperator):
         self.has_headers = has_headers
         self.transliterate_headers = transliterate_headers
         self.normalize_headers = normalize_headers
+        self.sanitize_headers = sanitize_headers
+        self.lowercase_headers = lowercase_headers
         self.column_mapping = column_mapping
         self.schema = schema
         self.chunk_size = chunk_size
@@ -173,13 +183,19 @@ class GoogleSheetsReadOperator(BaseOperator):
             logger.info("Reading headers from %s", header_range)
             header_rows = hook.get_values(self.spreadsheet_id, header_range)
             if header_rows:
-                headers = process_headers(
-                    header_rows[0],
-                    transliterate=self.transliterate_headers,
-                    normalize=self.normalize_headers,
-                )
                 if self.column_mapping:
+                    # column_mapping takes priority — skip all header
+                    # processing and apply the mapping to raw names.
+                    headers = process_headers(header_rows[0])
                     headers = [self.column_mapping.get(h, h) for h in headers]
+                else:
+                    headers = process_headers(
+                        header_rows[0],
+                        transliterate=self.transliterate_headers,
+                        normalize=self.normalize_headers,
+                        sanitize=self.sanitize_headers,
+                        lowercase=self.lowercase_headers,
+                    )
                 logger.info("Headers: %s", headers)
             data_start_row = 2
 

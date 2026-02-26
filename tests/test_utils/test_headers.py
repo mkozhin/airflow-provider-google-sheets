@@ -5,6 +5,7 @@ import pytest
 from airflow_provider_google_sheets.utils.headers import (
     process_headers,
     sanitize_header,
+    _strip_special_chars,
     _deduplicate,
     _builtin_transliterate,
 )
@@ -106,3 +107,57 @@ class TestProcessHeaders:
     def test_numeric_headers(self):
         result = process_headers([1, 2, 3])
         assert result == ["1", "2", "3"]
+
+    def test_sanitize(self):
+        result = process_headers(["My Column!", "Price ($)"], sanitize=True)
+        assert result == ["My_Column", "Price"]
+
+    def test_sanitize_preserves_case(self):
+        result = process_headers(["Name", "AGE"], sanitize=True)
+        assert result == ["Name", "AGE"]
+
+    def test_lowercase(self):
+        result = process_headers(["Name", "AGE"], lowercase=True)
+        assert result == ["name", "age"]
+
+    def test_sanitize_and_lowercase(self):
+        result = process_headers(["My Column!", "Price ($)"], sanitize=True, lowercase=True)
+        assert result == ["my_column", "price"]
+
+    def test_transliterate_sanitize_lowercase(self):
+        result = process_headers(
+            ["Моя Колонка!", "Цена ($)"],
+            transliterate=True, sanitize=True, lowercase=True,
+        )
+        for h in result:
+            assert h.isascii()
+            assert h == h.lower()
+            assert all(c.isalnum() or c == "_" for c in h)
+
+    def test_normalize_overrides_sanitize_lowercase(self):
+        """When normalize=True, sanitize and lowercase flags are ignored."""
+        result = process_headers(
+            ["My Column!"],
+            normalize=True, sanitize=False, lowercase=False,
+        )
+        assert result == ["my_column"]
+
+
+class TestStripSpecialChars:
+    def test_basic(self):
+        assert _strip_special_chars("My Column") == "My_Column"
+
+    def test_special_chars(self):
+        assert _strip_special_chars("Price ($)") == "Price"
+
+    def test_multiple_spaces(self):
+        assert _strip_special_chars("  a   b  ") == "a_b"
+
+    def test_cyrillic_preserved(self):
+        assert _strip_special_chars("Моя Колонка") == "Моя_Колонка"
+
+    def test_no_change(self):
+        assert _strip_special_chars("name") == "name"
+
+    def test_empty_string(self):
+        assert _strip_special_chars("") == ""

@@ -27,6 +27,19 @@ def sanitize_header(header: str) -> str:
     return header.lower()
 
 
+def _strip_special_chars(header: str) -> str:
+    """Remove all characters except letters, digits, and underscores.
+
+    Spaces are replaced with underscores before removal so that
+    multi-word headers remain readable (e.g. "My Column" → "My_Column").
+    """
+    header = header.strip()
+    header = re.sub(r"[\s]+", "_", header)
+    header = re.sub(r"[^\w\u0400-\u04FF]", "", header)  # keep word chars + Cyrillic
+    header = re.sub(r"_+", "_", header)
+    return header.strip("_")
+
+
 def _transliterate_text(text: str) -> str:
     """Transliterate Cyrillic text to Latin.
 
@@ -84,13 +97,19 @@ def process_headers(
     headers: list[str],
     transliterate: bool = False,
     normalize: bool = False,
+    sanitize: bool = False,
+    lowercase: bool = False,
 ) -> list[str]:
     """Process a list of raw header strings.
 
     Args:
         headers: Raw header values from the spreadsheet.
         transliterate: If *True*, Cyrillic characters are transliterated to Latin.
-        normalize: If *True*, headers are sanitized to snake_case identifiers.
+        normalize: If *True*, headers are sanitized to snake_case identifiers
+            (includes special char removal and lowercasing).
+        sanitize: If *True*, spaces and special characters are removed from
+            headers, keeping only letters, digits, and underscores.
+        lowercase: If *True*, headers are converted to lowercase.
 
     Returns:
         Processed headers with duplicates resolved.
@@ -104,6 +123,11 @@ def process_headers(
             value = _transliterate_text(value)
         if normalize:
             value = sanitize_header(value)
+        else:
+            if sanitize:
+                value = _strip_special_chars(value)
+            if lowercase:
+                value = value.lower()
         processed.append(value)
 
     return _deduplicate(processed)
