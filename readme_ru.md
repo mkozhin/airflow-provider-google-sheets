@@ -80,6 +80,19 @@ read_typed = GoogleSheetsReadOperator(
         "quantity": {"type": "int"},
     },
 )
+
+# Переименование кириллических заголовков через column_mapping
+read_mapped = GoogleSheetsReadOperator(
+    task_id="read_mapped",
+    spreadsheet_id="your-spreadsheet-id",
+    output_type="json",
+    output_path="/tmp/export.json",
+    column_mapping={
+        "Дата": "date",
+        "Клиент": "client",
+        "Сумма": "amount",
+    },
+)
 ```
 
 **Параметры:**

@@ -100,6 +100,19 @@ read_typed = GoogleSheetsReadOperator(
         "quantity": {"type": "int"},
     },
 )
+
+# Rename Cyrillic headers to Latin via column_mapping
+read_mapped = GoogleSheetsReadOperator(
+    task_id="read_mapped",
+    spreadsheet_id="your-spreadsheet-id",
+    output_type="json",
+    output_path="/tmp/export.json",
+    column_mapping={
+        "Дата": "date",
+        "Клиент": "client",
+        "Сумма": "amount",
+    },
+)
 ```
 
 **Parameters:**
