@@ -12,9 +12,11 @@ from airflow_provider_google_sheets.utils.data_formats import (
     normalize_input_data,
     read_csv_file,
     read_json_file,
+    read_jsonl_file,
     rows_to_dicts,
     write_csv_file,
     write_json_file,
+    write_jsonl_file,
 )
 
 
@@ -137,13 +139,77 @@ class TestReadJsonFile:
             read_json_file(path)
 
 
+class TestReadJsonlFile:
+    def test_list_of_dicts(self, tmp_dir):
+        path = os.path.join(tmp_dir, "data.jsonl")
+        with open(path, "w") as f:
+            f.write('{"a": 1, "b": 2}\n{"a": 3, "b": 4}\n')
+
+        headers, rows = read_jsonl_file(path)
+        assert headers == ["a", "b"]
+        assert rows == [[1, 2], [3, 4]]
+
+    def test_list_of_lists(self, tmp_dir):
+        path = os.path.join(tmp_dir, "data.jsonl")
+        with open(path, "w") as f:
+            f.write("[1, 2]\n[3, 4]\n")
+
+        headers, rows = read_jsonl_file(path)
+        assert headers is None
+        assert rows == [[1, 2], [3, 4]]
+
+    def test_empty_file(self, tmp_dir):
+        path = os.path.join(tmp_dir, "data.jsonl")
+        with open(path, "w") as f:
+            pass
+
+        headers, rows = read_jsonl_file(path)
+        assert headers is None
+        assert rows == []
+
+    def test_blank_lines_skipped(self, tmp_dir):
+        path = os.path.join(tmp_dir, "data.jsonl")
+        with open(path, "w") as f:
+            f.write('{"a": 1}\n\n\n{"a": 2}\n')
+
+        headers, rows = read_jsonl_file(path)
+        assert headers == ["a"]
+        assert rows == [[1], [2]]
+
+    def test_invalid_json_line_raises(self, tmp_dir):
+        path = os.path.join(tmp_dir, "data.jsonl")
+        with open(path, "w") as f:
+            f.write('{"a": 1}\nnot-json\n')
+
+        with pytest.raises(GoogleSheetsDataError, match="Failed to parse JSONL"):
+            read_jsonl_file(path)
+
+
+class TestWriteJsonlFile:
+    def test_write_with_headers(self, tmp_dir):
+        path = os.path.join(tmp_dir, "out.jsonl")
+        write_jsonl_file(path, ["a", "b"], [[1, 2], [3, 4]])
+
+        with open(path) as f:
+            data = [json.loads(line) for line in f if line.strip()]
+        assert data == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
+
+    def test_write_without_headers(self, tmp_dir):
+        path = os.path.join(tmp_dir, "out.jsonl")
+        write_jsonl_file(path, None, [[1, 2], [3, 4]])
+
+        with open(path) as f:
+            data = [json.loads(line) for line in f if line.strip()]
+        assert data == [[1, 2], [3, 4]]
+
+
 class TestWriteJsonFile:
     def test_write_with_headers(self, tmp_dir):
         path = os.path.join(tmp_dir, "out.json")
         write_json_file(path, ["a", "b"], [[1, 2], [3, 4]])
 
         with open(path) as f:
-            data = [json.loads(line) for line in f if line.strip()]
+            data = json.load(f)
         assert data == [{"a": 1, "b": 2}, {"a": 3, "b": 4}]
 
     def test_write_without_headers(self, tmp_dir):
@@ -151,7 +217,7 @@ class TestWriteJsonFile:
         write_json_file(path, None, [[1, 2], [3, 4]])
 
         with open(path) as f:
-            data = [json.loads(line) for line in f if line.strip()]
+            data = json.load(f)
         assert data == [[1, 2], [3, 4]]
 
 
@@ -245,6 +311,7 @@ class TestNormalizeInputData:
         assert rows == [[1, 2], [3, 4]]
 
     def test_csv_file_auto(self, tmp_dir):
+        """Auto-detection reads .csv files as CSV."""
         path = os.path.join(tmp_dir, "data.csv")
         with open(path, "w") as f:
             f.write("a,b\n1,2\n")
@@ -253,14 +320,15 @@ class TestNormalizeInputData:
         assert headers == ["a", "b"]
         assert rows == [["1", "2"]]
 
-    def test_json_file_auto(self, tmp_dir):
+    def test_json_file_auto_reads_as_jsonl(self, tmp_dir):
+        """Auto-detection reads .json files as JSONL (not JSON array)."""
         path = os.path.join(tmp_dir, "data.json")
         with open(path, "w") as f:
-            json.dump([{"a": 1}], f)
+            f.write('{"a": 1}\n{"a": 2}\n')
 
         headers, rows = normalize_input_data(path)
         assert headers == ["a"]
-        assert rows == [[1]]
+        assert rows == [[1], [2]]
 
     def test_explicit_csv_source(self, tmp_dir):
         path = os.path.join(tmp_dir, "data.csv")
@@ -286,6 +354,19 @@ class TestNormalizeInputData:
         headers, rows = normalize_input_data([["h"], [1]], source_type="rows", has_headers=True)
         assert headers == ["h"]
         assert rows == [[1]]
+
+    def test_explicit_jsonl_source(self, tmp_dir):
+        path = os.path.join(tmp_dir, "data.jsonl")
+        with open(path, "w") as f:
+            f.write('{"a": 1}\n')
+
+        headers, rows = normalize_input_data(None, source_type="jsonl", file_path=path)
+        assert headers == ["a"]
+        assert rows == [[1]]
+
+    def test_jsonl_without_file_path_raises(self):
+        with pytest.raises(GoogleSheetsDataError, match="file_path is required"):
+            normalize_input_data(None, source_type="jsonl")
 
     def test_csv_without_file_path_raises(self):
         with pytest.raises(GoogleSheetsDataError, match="file_path is required"):

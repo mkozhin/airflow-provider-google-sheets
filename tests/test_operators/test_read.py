@@ -466,6 +466,7 @@ class TestOutputTypes:
         assert "1,2" in content
 
     def test_output_json(self, mock_hook, context, tmp_dir):
+        """output_type='json' writes a valid JSON array."""
         mock_hook.get_values.side_effect = [
             [["a", "b"]],
             [["1", "2"]],
@@ -477,6 +478,28 @@ class TestOutputTypes:
             spreadsheet_id=SPREADSHEET_ID,
             has_headers=True,
             output_type="json",
+            output_path=path,
+        )
+        result = op.execute(context)
+
+        assert result == path
+        with open(path) as f:
+            data = json.load(f)
+        assert data == [{"a": "1", "b": "2"}]
+
+    def test_output_jsonl(self, mock_hook, context, tmp_dir):
+        """output_type='jsonl' writes one JSON object per line."""
+        mock_hook.get_values.side_effect = [
+            [["a", "b"]],
+            [["1", "2"]],
+        ]
+
+        path = os.path.join(tmp_dir, "out.jsonl")
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            output_type="jsonl",
             output_path=path,
         )
         result = op.execute(context)
@@ -549,8 +572,52 @@ class TestStreamingOutput:
         assert lines[0].strip() == "a,b"
         assert lines[3].strip() == "5,6"
 
+    def test_jsonl_streaming_multiple_chunks(self, mock_hook, context, tmp_dir):
+        """JSONL output streams chunks directly to file."""
+        mock_hook.get_values.side_effect = [
+            [["x"]],                # headers
+            [["1"], ["2"]],         # chunk 1
+            [["3"]],               # chunk 2
+        ]
+
+        path = os.path.join(tmp_dir, "stream.jsonl")
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            chunk_size=2,
+            output_type="jsonl",
+            output_path=path,
+        )
+        result = op.execute(context)
+
+        assert result == path
+        with open(path) as f:
+            data = [json.loads(line) for line in f if line.strip()]
+        assert data == [{"x": "1"}, {"x": "2"}, {"x": "3"}]
+
+    def test_jsonl_streaming_without_headers(self, mock_hook, context, tmp_dir):
+        """JSONL without headers outputs list of lists."""
+        mock_hook.get_values.side_effect = [
+            [["a", "b"], ["c", "d"]],
+        ]
+
+        path = os.path.join(tmp_dir, "stream_noheader.jsonl")
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=False,
+            output_type="jsonl",
+            output_path=path,
+        )
+        result = op.execute(context)
+
+        with open(path) as f:
+            data = [json.loads(line) for line in f if line.strip()]
+        assert data == [["a", "b"], ["c", "d"]]
+
     def test_json_streaming_multiple_chunks(self, mock_hook, context, tmp_dir):
-        """JSON output streams chunks directly to file."""
+        """JSON array output streams chunks directly to file."""
         mock_hook.get_values.side_effect = [
             [["x"]],                # headers
             [["1"], ["2"]],         # chunk 1
@@ -570,11 +637,11 @@ class TestStreamingOutput:
 
         assert result == path
         with open(path) as f:
-            data = [json.loads(line) for line in f if line.strip()]
+            data = json.load(f)
         assert data == [{"x": "1"}, {"x": "2"}, {"x": "3"}]
 
     def test_json_streaming_without_headers(self, mock_hook, context, tmp_dir):
-        """JSON without headers outputs list of lists."""
+        """JSON array without headers outputs list of lists."""
         mock_hook.get_values.side_effect = [
             [["a", "b"], ["c", "d"]],
         ]
@@ -590,7 +657,7 @@ class TestStreamingOutput:
         result = op.execute(context)
 
         with open(path) as f:
-            data = [json.loads(line) for line in f if line.strip()]
+            data = json.load(f)
         assert data == [["a", "b"], ["c", "d"]]
 
     def test_xcom_max_rows_exceeded(self, mock_hook, context):

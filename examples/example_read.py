@@ -3,7 +3,7 @@
 Demonstrates various GoogleSheetsReadOperator configurations:
 - Basic XCom read (with/without headers)
 - Schema-based type conversion
-- Streaming to CSV/JSON files
+- Streaming to CSV/JSON/JSONL files
 - Header transliteration and normalization
 """
 
@@ -95,7 +95,7 @@ sheets_read_schema()
 
 
 # ---------------------------------------------------------------------------
-# DAG 3: Streaming to CSV / JSON files
+# DAG 3: Streaming to CSV / JSON / JSONL files
 # ---------------------------------------------------------------------------
 @dag(
     dag_id="example_sheets_read_streaming",
@@ -116,14 +116,26 @@ def sheets_read_streaming():
         chunk_size=10000,
     )
 
-    # Stream to JSON
+    # Stream to JSONL (one JSON object per line) — best for large datasets
+    # and for piping into GoogleSheetsWriteOperator (JSONL is the default input)
+    GoogleSheetsReadOperator(
+        task_id="stream_to_jsonl",
+        gcp_conn_id=GCP_CONN_ID,
+        spreadsheet_id=SPREADSHEET_ID,
+        sheet_name="LargeData",
+        output_type="jsonl",
+        output_path="/tmp/sheets_export.json",
+        chunk_size=10000,
+    )
+
+    # Stream to JSON array — standard JSON format, readable with json.load()
     GoogleSheetsReadOperator(
         task_id="stream_to_json",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
         sheet_name="LargeData",
         output_type="json",
-        output_path="/tmp/sheets_export.json",
+        output_path="/tmp/sheets_export_array.json",
         chunk_size=10000,
     )
 

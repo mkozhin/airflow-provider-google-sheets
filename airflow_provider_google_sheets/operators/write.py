@@ -37,6 +37,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
         has_headers: Whether *data* contains a header row.
         write_headers: Write the header row (for *overwrite* mode).
         schema: Optional column schema for formatting values before write.
+        clear_mode: How to clear existing data in *overwrite* mode.
+            ``"sheet"`` (default) clears the entire sheet and trims extra rows
+            after writing.  ``"range"`` clears only the data columns, leaving
+            neighbouring columns and extra rows untouched.
         batch_size: Rows per API request.
         pause_between_batches: Seconds to wait between batches.
         merge_key: Column name used as the key for *smart_merge*.
@@ -48,6 +52,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         "cell_range",
         "data",
         "data_xcom_task_id",
+        "clear_mode",
     )
 
     def __init__(
@@ -58,6 +63,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         sheet_name: str | None = None,
         cell_range: str | None = None,
         write_mode: str = "overwrite",
+        clear_mode: str = "sheet",
         data: Any = None,
         data_xcom_task_id: str | None = None,
         data_xcom_key: str = "return_value",
@@ -75,6 +81,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.sheet_name = sheet_name
         self.cell_range = cell_range
         self.write_mode = write_mode
+        self.clear_mode = clear_mode
         self.data = data
         self.data_xcom_task_id = data_xcom_task_id
         self.data_xcom_key = data_xcom_key
@@ -162,10 +169,6 @@ class GoogleSheetsWriteOperator(BaseOperator):
         if not target.startswith(prefix) and prefix:
             target = f"{prefix}{target}"
 
-        # Clear existing content
-        logger.info("Clearing range %s", target)
-        hook.clear_values(self.spreadsheet_id, target)
-
         # Determine the start column and row from the target range
         start_col, start_row_num = self._parse_range_start(target)
 
@@ -174,6 +177,23 @@ class GoogleSheetsWriteOperator(BaseOperator):
         if self.write_headers and headers:
             all_rows.append(headers)
         all_rows.extend(rows)
+
+        # Determine data width (number of columns)
+        num_data_cols = len(headers) if headers else (max(len(r) for r in all_rows) if all_rows else 0)
+
+        # Clear existing content based on clear_mode
+        if self.clear_mode == "sheet":
+            # Clear entire sheet
+            clear_range = prefix.rstrip("!") if prefix else "Sheet1"
+            logger.info("Clearing entire sheet %s", clear_range)
+            hook.clear_values(self.spreadsheet_id, clear_range)
+        else:
+            # clear_mode == "range": clear only the data columns
+            start_col_idx = self._column_letter_to_index(start_col)
+            end_col = self._index_to_column_letter(start_col_idx + num_data_cols - 1) if num_data_cols else start_col
+            clear_range = f"{prefix}{start_col}:{end_col}"
+            logger.info("Clearing range %s", clear_range)
+            hook.clear_values(self.spreadsheet_id, clear_range)
 
         # Ensure the sheet has enough rows for all data
         required_rows = start_row_num + len(all_rows) - 1
@@ -189,6 +209,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
             total_written += len(batch)
             if i + self.batch_size < len(all_rows):
                 time.sleep(self.pause_between_batches)
+
+        # Trim extra rows in sheet mode
+        if self.clear_mode == "sheet":
+            keep_rows = start_row_num + len(all_rows) - 1
+            hook.trim_sheet(self.spreadsheet_id, self.sheet_name, keep_rows)
 
         logger.info("Overwrite complete: %d rows written", total_written)
         return {"mode": "overwrite", "rows_written": total_written}
@@ -546,6 +571,17 @@ class GoogleSheetsWriteOperator(BaseOperator):
             end_col = "".join(c for c in end_part if c.isalpha())
             rn = upd["row_num"]
             upd["range"] = f"{prefix}A{rn}:{end_col}{rn}"
+
+    @staticmethod
+    def _column_letter_to_index(letter: str) -> int:
+        """Convert an A1-notation column letter to a 0-based index.
+
+        A → 0, B → 1, … Z → 25, AA → 26, etc.
+        """
+        result = 0
+        for ch in letter.upper():
+            result = result * 26 + (ord(ch) - ord("A") + 1)
+        return result - 1
 
     @staticmethod
     def _index_to_column_letter(index: int) -> str:

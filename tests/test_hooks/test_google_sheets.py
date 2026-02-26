@@ -214,3 +214,61 @@ class TestGetSheetId:
 
         with pytest.raises(GoogleSheetsAPIError, match="not found"):
             hook.get_sheet_id(SPREADSHEET_ID, "Missing")
+
+
+class TestTrimSheet:
+    def test_trim_sheet_deletes_extra_rows(self, hook, mock_service):
+        meta = {
+            "sheets": [{
+                "properties": {
+                    "title": SHEET_NAME,
+                    "sheetId": 0,
+                    "gridProperties": {"rowCount": 20},
+                }
+            }]
+        }
+        mock_service.spreadsheets().get().execute.return_value = meta
+        mock_service.spreadsheets().batchUpdate().execute.return_value = {"replies": [{}]}
+
+        hook.trim_sheet(SPREADSHEET_ID, SHEET_NAME, keep_rows=10)
+
+        call_args = mock_service.spreadsheets().batchUpdate.call_args
+        requests = call_args[1]["body"]["requests"]
+        assert len(requests) == 1
+        delete_range = requests[0]["deleteDimension"]["range"]
+        assert delete_range["sheetId"] == 0
+        assert delete_range["dimension"] == "ROWS"
+        assert delete_range["startIndex"] == 10
+        assert delete_range["endIndex"] == 20
+
+    def test_trim_sheet_noop_when_fewer_rows(self, hook, mock_service):
+        meta = {
+            "sheets": [{
+                "properties": {
+                    "title": SHEET_NAME,
+                    "sheetId": 0,
+                    "gridProperties": {"rowCount": 5},
+                }
+            }]
+        }
+        mock_service.spreadsheets().get().execute.return_value = meta
+
+        hook.trim_sheet(SPREADSHEET_ID, SHEET_NAME, keep_rows=10)
+
+        mock_service.spreadsheets().batchUpdate.assert_not_called()
+
+    def test_trim_sheet_noop_when_equal_rows(self, hook, mock_service):
+        meta = {
+            "sheets": [{
+                "properties": {
+                    "title": SHEET_NAME,
+                    "sheetId": 0,
+                    "gridProperties": {"rowCount": 10},
+                }
+            }]
+        }
+        mock_service.spreadsheets().get().execute.return_value = meta
+
+        hook.trim_sheet(SPREADSHEET_ID, SHEET_NAME, keep_rows=10)
+
+        mock_service.spreadsheets().batchUpdate.assert_not_called()

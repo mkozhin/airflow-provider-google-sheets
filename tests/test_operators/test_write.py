@@ -28,6 +28,11 @@ def mock_hook():
             "sheets": [{"properties": {"sheetId": 0, "title": "Sheet1"}}]
         }
         hook.get_sheet_id.return_value = 0
+        hook.get_sheet_properties.return_value = {
+            "sheetId": 0,
+            "title": "Sheet1",
+            "gridProperties": {"rowCount": 1000},
+        }
         yield hook
 
 
@@ -58,6 +63,9 @@ class TestOverwrite:
         result = op.execute(context)
 
         mock_hook.clear_values.assert_called_once()
+        # Default clear_mode="sheet" clears entire sheet
+        clear_range = mock_hook.clear_values.call_args[0][1]
+        assert clear_range == "Sheet1"
         mock_hook.update_values.assert_called_once()
         # First row should be headers, second row data
         written = mock_hook.update_values.call_args[0][2]
@@ -65,6 +73,8 @@ class TestOverwrite:
         assert written[1] == ["Alice", 30]
         assert result["mode"] == "overwrite"
         assert result["rows_written"] == 2  # header + 1 data row
+        # trim_sheet called in sheet mode
+        mock_hook.trim_sheet.assert_called_once_with(SPREADSHEET_ID, None, 2)
 
     def test_overwrite_without_headers(self, mock_hook, context):
         op = GoogleSheetsWriteOperator(
@@ -79,6 +89,7 @@ class TestOverwrite:
         written = mock_hook.update_values.call_args[0][2]
         assert written[0] == ["Alice", 30]
         assert result["rows_written"] == 1
+        mock_hook.trim_sheet.assert_called_once_with(SPREADSHEET_ID, None, 1)
 
     def test_overwrite_batching(self, mock_hook, context):
         data = [[i, i * 10] for i in range(5)]
@@ -109,7 +120,8 @@ class TestOverwrite:
         op.execute(context)
 
         clear_range = mock_hook.clear_values.call_args[0][1]
-        assert "Data!" in clear_range
+        assert clear_range == "Data"
+        mock_hook.trim_sheet.assert_called_once_with(SPREADSHEET_ID, "Data", 1)
 
     def test_overwrite_with_schema(self, mock_hook, context):
         op = GoogleSheetsWriteOperator(
@@ -208,9 +220,10 @@ class TestDataSources:
         assert appended == [["1", "2"], ["3", "4"]]
 
     def test_data_from_json_file(self, mock_hook, context, tmp_dir):
+        """File path auto-detected as JSONL."""
         path = os.path.join(tmp_dir, "data.json")
         with open(path, "w") as f:
-            json.dump([{"x": 10}, {"x": 20}], f)
+            f.write('{"x": 10}\n{"x": 20}\n')
 
         op = GoogleSheetsWriteOperator(
             task_id="test",
@@ -474,8 +487,8 @@ class TestSmartMerge:
 
 
 class TestOverwriteRangeAlignment:
-    def test_overwrite_with_cell_range_uses_same_start(self, mock_hook, context):
-        """When cell_range='B2:D', both clear and write should use B2."""
+    def test_overwrite_with_cell_range_sheet_mode(self, mock_hook, context):
+        """Sheet mode with cell_range: clears entire sheet, writes at B2."""
         op = GoogleSheetsWriteOperator(
             task_id="test",
             spreadsheet_id=SPREADSHEET_ID,
@@ -487,11 +500,11 @@ class TestOverwriteRangeAlignment:
         )
         op.execute(context)
 
-        # Clear should be on B2:D
+        # Sheet mode clears entire sheet even with cell_range
         clear_range = mock_hook.clear_values.call_args[0][1]
-        assert "B2:D" in clear_range
+        assert clear_range == "Sheet1"
 
-        # Write should start at B2, not A1
+        # Write should start at B2
         write_range = mock_hook.update_values.call_args[0][1]
         assert "B2" in write_range
         assert "A1" not in write_range
@@ -510,6 +523,7 @@ class TestOverwriteRangeAlignment:
 
         write_range = mock_hook.update_values.call_args[0][1]
         assert "A1" in write_range
+        mock_hook.trim_sheet.assert_called_once()
 
     def test_overwrite_batching_with_cell_range(self, mock_hook, context):
         """Multiple batches with cell_range='C5:F' continue from correct column."""
@@ -546,9 +560,128 @@ class TestOverwriteRangeAlignment:
         )
         op.execute(context)
 
+        # Sheet mode: clears entire sheet
+        clear_range = mock_hook.clear_values.call_args[0][1]
+        assert clear_range == "Data"
+
         write_range = mock_hook.update_values.call_args[0][1]
         assert write_range.startswith("Data!")
         assert "B3" in write_range
+
+
+class TestOverwriteRangeMode:
+    """Tests for clear_mode='range' — clears only data columns, no trim."""
+
+    def test_range_mode_clears_only_data_columns(self, mock_hook, context):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            clear_mode="range",
+            data=[{"a": 1, "b": 2, "c": 3}],
+        )
+        op.execute(context)
+
+        clear_range = mock_hook.clear_values.call_args[0][1]
+        assert clear_range == "Sheet1!A:C"
+
+    def test_range_mode_with_cell_range(self, mock_hook, context):
+        """cell_range='B2:D' → clear columns B:D only."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            clear_mode="range",
+            cell_range="B2:D",
+            data=[["x", "y", "z"]],
+            has_headers=False,
+        )
+        op.execute(context)
+
+        clear_range = mock_hook.clear_values.call_args[0][1]
+        assert clear_range == "Sheet1!B:D"
+
+        write_range = mock_hook.update_values.call_args[0][1]
+        assert "B2" in write_range
+
+    def test_range_mode_no_trim(self, mock_hook, context):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            clear_mode="range",
+            data=[{"a": 1}],
+        )
+        op.execute(context)
+
+        mock_hook.trim_sheet.assert_not_called()
+
+    def test_range_mode_without_sheet_name(self, mock_hook, context):
+        """Without sheet_name, uses Sheet1 as default prefix."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            clear_mode="range",
+            data=[["x", "y"]],
+            has_headers=False,
+        )
+        op.execute(context)
+
+        clear_range = mock_hook.clear_values.call_args[0][1]
+        assert clear_range == "A:B"
+
+
+class TestOverwriteSheetModeTrim:
+    """Tests for clear_mode='sheet' trimming behavior."""
+
+    def test_sheet_mode_trims_extra_rows(self, mock_hook, context):
+        """Write 5 rows to sheet with 20 rows → trim to 5."""
+        data = [[i] for i in range(5)]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Data",
+            write_mode="overwrite",
+            data=data,
+            has_headers=False,
+        )
+        op.execute(context)
+
+        mock_hook.trim_sheet.assert_called_once_with(SPREADSHEET_ID, "Data", 5)
+
+    def test_sheet_mode_trim_with_headers_and_offset(self, mock_hook, context):
+        """With headers + cell_range starting at row 3, keep_rows accounts for offset."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Data",
+            write_mode="overwrite",
+            cell_range="A3",
+            data=[{"x": 1, "y": 2}],
+        )
+        op.execute(context)
+
+        # start_row=3, header + 1 data row = 2 rows → keep_rows = 3 + 2 - 1 = 4
+        mock_hook.trim_sheet.assert_called_once_with(SPREADSHEET_ID, "Data", 4)
+
+
+class TestColumnLetterToIndex:
+    def test_single_letter(self):
+        assert GoogleSheetsWriteOperator._column_letter_to_index("A") == 0
+        assert GoogleSheetsWriteOperator._column_letter_to_index("B") == 1
+        assert GoogleSheetsWriteOperator._column_letter_to_index("Z") == 25
+
+    def test_double_letter(self):
+        assert GoogleSheetsWriteOperator._column_letter_to_index("AA") == 26
+        assert GoogleSheetsWriteOperator._column_letter_to_index("AB") == 27
+        assert GoogleSheetsWriteOperator._column_letter_to_index("AZ") == 51
+
+    def test_lowercase(self):
+        assert GoogleSheetsWriteOperator._column_letter_to_index("a") == 0
+        assert GoogleSheetsWriteOperator._column_letter_to_index("aa") == 26
 
 
 class TestParseRangeStart:

@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.0
+
+- **Breaking:** `output_type="json"` in `GoogleSheetsReadOperator` now writes a valid JSON array (`[{...}, {...}]`). Previously it wrote JSONL — use `output_type="jsonl"` for the old behavior
+- Added `output_type="jsonl"` to `GoogleSheetsReadOperator` — streams one JSON object per line (memory-efficient, BigQuery-compatible)
+- Added `output_type="json"` to `GoogleSheetsReadOperator` — streams a valid JSON array file, readable via `json.load()`
+- `GoogleSheetsWriteOperator` now reads file input as JSONL by default (`.csv` files still auto-detected as CSV)
+- Added `source_type="json"` support in `normalize_input_data()` for reading JSON array files explicitly
+- Added `read_jsonl_file()` utility — reads JSONL files and returns `(headers, rows)`
+- Renamed `write_json_file()` → `write_jsonl_file()` (writes JSONL format)
+- New `write_json_file()` — writes valid JSON array format
+- Added `clear_mode` parameter to `GoogleSheetsWriteOperator` overwrite mode:
+  - `"sheet"` (default) — clears entire sheet and trims extra rows after writing (fixes stale data remaining below new export)
+  - `"range"` — clears only the data columns, leaves neighbouring columns and extra rows untouched
+- Added `trim_sheet()` method to `GoogleSheetsHook` — deletes rows beyond a specified count
+- **Fixed:** overwrite mode no longer leaves old data below new export (was clearing only `A1` cell instead of entire sheet)
+- Simplified Sheets → BigQuery example DAGs (removed intermediate conversion tasks)
+- Updated all example DAGs and both READMEs (EN/RU) for new JSON/JSONL support
+
 ## v0.1.9
 
 - **Breaking:** `transliterate_headers` default changed from `False` to `True` — Cyrillic headers are now transliterated to Latin by default

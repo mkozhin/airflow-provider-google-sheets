@@ -10,7 +10,7 @@ Apache Airflow provider for Google Sheets API v4. Read, write, and manage Google
 
 ## Features
 
-- **Read** data from Google Sheets with chunked streaming, schema-based type conversion, and CSV/JSON/XCom output
+- **Read** data from Google Sheets with chunked streaming, schema-based type conversion, and CSV/JSON/JSONL/XCom output
 - **Write** data in three modes: overwrite, append, and smart merge (upsert by key)
 - **Smart merge** — update, insert, and delete rows based on a key column with correct index recalculation
 - **Manage** spreadsheets — create new spreadsheets and sheets
@@ -90,6 +90,23 @@ read_csv = GoogleSheetsReadOperator(
     chunk_size=10000,
 )
 
+# Stream to JSONL file (one JSON object per line, memory-efficient)
+read_jsonl = GoogleSheetsReadOperator(
+    task_id="read_to_jsonl",
+    spreadsheet_id="your-spreadsheet-id",
+    output_type="jsonl",
+    output_path="/tmp/export.json",
+    chunk_size=10000,
+)
+
+# Stream to JSON array file
+read_json = GoogleSheetsReadOperator(
+    task_id="read_to_json",
+    spreadsheet_id="your-spreadsheet-id",
+    output_type="json",
+    output_path="/tmp/export.json",
+)
+
 # Read with type conversion
 read_typed = GoogleSheetsReadOperator(
     task_id="read_typed",
@@ -113,7 +130,7 @@ read_default = GoogleSheetsReadOperator(
 read_mapped = GoogleSheetsReadOperator(
     task_id="read_mapped",
     spreadsheet_id="your-spreadsheet-id",
-    output_type="json",
+    output_type="jsonl",
     output_path="/tmp/export.json",
     column_mapping={
         "Дата": "report_date",
@@ -148,8 +165,8 @@ read_raw = GoogleSheetsReadOperator(
 | `column_mapping` | dict | `None` | Rename headers using raw names: `{"Original": "new_name"}`. Skips all other processing |
 | `schema` | dict | `None` | Column type schema |
 | `chunk_size` | int | `5000` | Rows per API request |
-| `output_type` | str | `"xcom"` | `"xcom"`, `"csv"`, or `"json"` |
-| `output_path` | str | `None` | File path for csv/json output |
+| `output_type` | str | `"xcom"` | `"xcom"`, `"csv"`, `"json"` (JSON array), or `"jsonl"` (one object per line) |
+| `output_path` | str | `None` | File path for csv/json/jsonl output |
 | `max_xcom_rows` | int | `50000` | Max rows for XCom output |
 
 ### GoogleSheetsWriteOperator
@@ -198,6 +215,7 @@ merge = GoogleSheetsWriteOperator(
 | `sheet_name` | str | `None` | Sheet name |
 | `cell_range` | str | `None` | Target A1 range (overwrite mode) |
 | `write_mode` | str | `"overwrite"` | `"overwrite"`, `"append"`, `"smart_merge"` |
+| `clear_mode` | str | `"sheet"` | Overwrite clearing strategy: `"sheet"` clears entire sheet and trims extra rows; `"range"` clears only data columns |
 | `data` | Any | `None` | Data: list[list], list[dict], or file path |
 | `data_xcom_task_id` | str | `None` | Pull data from this task's XCom |
 | `data_xcom_key` | str | `"return_value"` | XCom key |
@@ -211,8 +229,11 @@ merge = GoogleSheetsWriteOperator(
 **Data input formats:**
 - `list[dict]` — headers auto-detected from keys
 - `list[list]` — raw rows (set `has_headers=True` if first row is header)
-- `str` — path to CSV or JSON file
+- `str` — file path (`.csv` files read as CSV; all other extensions read as JSONL by default)
 - XCom — set `data_xcom_task_id`
+
+File format is auto-detected by extension: `.csv` → CSV, everything else → JSONL.
+To read a JSON array file, pass `source_type="json"` to `normalize_input_data()` or write data as JSONL instead.
 
 ### Smart Merge Algorithm
 

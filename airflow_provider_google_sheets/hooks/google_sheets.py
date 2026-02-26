@@ -320,6 +320,40 @@ class GoogleSheetsHook(BaseHook):
             }
         }])
 
+    def trim_sheet(
+        self,
+        spreadsheet_id: str,
+        sheet_name: str | None,
+        keep_rows: int,
+    ) -> None:
+        """Delete rows beyond *keep_rows* so no stale data remains.
+
+        If the sheet has fewer or equal rows, this is a no-op.
+        """
+        props = self.get_sheet_properties(spreadsheet_id, sheet_name)
+        grid = props.get("gridProperties", {})
+        current_rows = grid.get("rowCount", 0)
+        if current_rows <= keep_rows:
+            return
+        sheet_id = props["sheetId"]
+        logger.info(
+            "Trimming sheet '%s': deleting rows %d–%d (keeping %d)",
+            sheet_name or "(first)",
+            keep_rows + 1,
+            current_rows,
+            keep_rows,
+        )
+        self.batch_update(spreadsheet_id, [{
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": keep_rows,
+                    "endIndex": current_rows,
+                }
+            }
+        }])
+
     def get_sheet_id(self, spreadsheet_id: str, sheet_name: str) -> int:
         """Resolve a sheet *name* to its numeric ``sheetId``."""
         meta = self.get_spreadsheet_metadata(spreadsheet_id)

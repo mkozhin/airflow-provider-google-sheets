@@ -3,8 +3,10 @@
 Demonstrates GoogleSheetsWriteOperator in overwrite and append modes:
 - Overwrite with cell_range
 - Append
-- Data from XCom, CSV file, JSON file, list[dict]
+- Data from XCom, CSV file, JSONL file, list[dict]
 - Schema formatting on write
+
+File input: .csv files are read as CSV, all other extensions as JSONL by default.
 """
 
 from datetime import datetime
@@ -86,6 +88,21 @@ def sheets_write_overwrite():
         data="/tmp/large_data.csv",
         batch_size=500,
         pause_between_batches=2.0,
+    )
+
+    # Overwrite only specific columns (range mode) — leaves other columns intact
+    GoogleSheetsWriteOperator(
+        task_id="write_range_mode",
+        gcp_conn_id=GCP_CONN_ID,
+        spreadsheet_id=SPREADSHEET_ID,
+        sheet_name="Shared",
+        cell_range="B2:D",
+        write_mode="overwrite",
+        clear_mode="range",
+        data=[
+            {"col1": "a", "col2": "b", "col3": "c"},
+            {"col1": "d", "col2": "e", "col3": "f"},
+        ],
     )
 
 

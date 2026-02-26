@@ -1,8 +1,8 @@
 """Example DAGs for Google Sheets → BigQuery pipelines.
 
 Demonstrates three patterns:
-1. Overwrite — full replace of a BigQuery table
-2. Append — add rows to BigQuery
+1. Overwrite — full replace of a BigQuery table (stream via JSONL)
+2. Append — add rows to BigQuery (stream via JSONL)
 3. Update by date range — delete+insert for a date period read from Sheets
 """
 
@@ -33,11 +33,14 @@ BQ_TABLE = "your_table"
     tags=["google-sheets", "bigquery", "example"],
 )
 def sheets_to_bq_overwrite():
+    # Stream directly to JSONL file — no XCom, no memory accumulation
     read_sheets = GoogleSheetsReadOperator(
         task_id="read_from_sheets",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
         sheet_name="SalesData",
+        output_type="jsonl",
+        output_path="/tmp/sheets_to_bq.jsonl",
         schema={
             "date": {"type": "date", "format": "%Y-%m-%d"},
             "revenue": {"type": "float"},
@@ -45,25 +48,12 @@ def sheets_to_bq_overwrite():
         },
     )
 
-    @task
-    def prepare_bq_load(**context):
-        """Convert list[dict] from XCom to newline-delimited JSON for BQ load."""
-        import json
-
-        rows = context["ti"].xcom_pull(task_ids="read_from_sheets")
-        ndjson_path = "/tmp/sheets_to_bq.jsonl"
-        with open(ndjson_path, "w") as f:
-            for row in rows:
-                row_copy = {k: str(v) if hasattr(v, "isoformat") else v for k, v in row.items()}
-                f.write(json.dumps(row_copy) + "\n")
-        return ndjson_path
-
     load_bq = BigQueryInsertJobOperator(
         task_id="load_to_bigquery",
         gcp_conn_id=GCP_CONN_ID,
         configuration={
             "load": {
-                "sourceUris": ["{{ ti.xcom_pull(task_ids='prepare_bq_load') }}"],
+                "sourceUris": ["{{ ti.xcom_pull(task_ids='read_from_sheets') }}"],
                 "destinationTable": {
                     "projectId": BQ_PROJECT,
                     "datasetId": BQ_DATASET,
@@ -76,7 +66,7 @@ def sheets_to_bq_overwrite():
         },
     )
 
-    read_sheets >> prepare_bq_load() >> load_bq
+    read_sheets >> load_bq
 
 
 sheets_to_bq_overwrite()
@@ -93,31 +83,22 @@ sheets_to_bq_overwrite()
     tags=["google-sheets", "bigquery", "example"],
 )
 def sheets_to_bq_append():
+    # Stream directly to JSONL file
     read_new_rows = GoogleSheetsReadOperator(
         task_id="read_new_rows",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
         sheet_name="NewEntries",
+        output_type="jsonl",
+        output_path="/tmp/sheets_append.jsonl",
     )
-
-    @task
-    def prepare_append(**context):
-        import json
-
-        rows = context["ti"].xcom_pull(task_ids="read_new_rows")
-        path = "/tmp/sheets_append.jsonl"
-        with open(path, "w") as f:
-            for row in rows:
-                row_copy = {k: str(v) if hasattr(v, "isoformat") else v for k, v in row.items()}
-                f.write(json.dumps(row_copy) + "\n")
-        return path
 
     append_bq = BigQueryInsertJobOperator(
         task_id="append_to_bigquery",
         gcp_conn_id=GCP_CONN_ID,
         configuration={
             "load": {
-                "sourceUris": ["{{ ti.xcom_pull(task_ids='prepare_append') }}"],
+                "sourceUris": ["{{ ti.xcom_pull(task_ids='read_new_rows') }}"],
                 "destinationTable": {
                     "projectId": BQ_PROJECT,
                     "datasetId": BQ_DATASET,
@@ -130,7 +111,7 @@ def sheets_to_bq_append():
         },
     )
 
-    read_new_rows >> prepare_append() >> append_bq
+    read_new_rows >> append_bq
 
 
 sheets_to_bq_append()
@@ -147,6 +128,7 @@ sheets_to_bq_append()
     tags=["google-sheets", "bigquery", "example"],
 )
 def sheets_to_bq_date_update():
+    # Read to XCom to compute date range, then stream to JSONL for BQ load
     read_data = GoogleSheetsReadOperator(
         task_id="read_sheets_data",
         gcp_conn_id=GCP_CONN_ID,
@@ -160,8 +142,10 @@ def sheets_to_bq_date_update():
     )
 
     @task
-    def compute_date_range(**context):
-        """Determine min/max date from the data read from Sheets."""
+    def compute_date_range_and_export(**context):
+        """Determine min/max date and write JSONL file for BQ load."""
+        import json
+
         rows = context["ti"].xcom_pull(task_ids="read_sheets_data")
         dates = [row["date"] for row in rows if row.get("date")]
         date_strings = [str(d) for d in dates]
@@ -169,7 +153,14 @@ def sheets_to_bq_date_update():
         max_date = max(date_strings)
         context["ti"].xcom_push(key="min_date", value=min_date)
         context["ti"].xcom_push(key="max_date", value=max_date)
-        return {"min_date": min_date, "max_date": max_date}
+
+        path = "/tmp/sheets_date_update.jsonl"
+        with open(path, "w") as f:
+            for row in rows:
+                row_copy = {k: str(v) if hasattr(v, "isoformat") else v for k, v in row.items()}
+                json.dump(row_copy, f, ensure_ascii=False)
+                f.write("\n")
+        return path
 
     # Delete existing rows in BigQuery for the date range
     delete_period = BigQueryInsertJobOperator(
@@ -179,32 +170,20 @@ def sheets_to_bq_date_update():
             "query": {
                 "query": f"""
                     DELETE FROM `{BQ_PROJECT}.{BQ_DATASET}.{BQ_TABLE}`
-                    WHERE date BETWEEN '{{{{ ti.xcom_pull(task_ids="compute_date_range", key="min_date") }}}}'
-                      AND '{{{{ ti.xcom_pull(task_ids="compute_date_range", key="max_date") }}}}'
+                    WHERE date BETWEEN '{{{{ ti.xcom_pull(task_ids="compute_date_range_and_export", key="min_date") }}}}'
+                      AND '{{{{ ti.xcom_pull(task_ids="compute_date_range_and_export", key="max_date") }}}}'
                 """,
                 "useLegacySql": False,
             }
         },
     )
 
-    @task
-    def prepare_insert(**context):
-        import json
-
-        rows = context["ti"].xcom_pull(task_ids="read_sheets_data")
-        path = "/tmp/sheets_date_update.jsonl"
-        with open(path, "w") as f:
-            for row in rows:
-                row_copy = {k: str(v) if hasattr(v, "isoformat") else v for k, v in row.items()}
-                f.write(json.dumps(row_copy) + "\n")
-        return path
-
     insert_new = BigQueryInsertJobOperator(
         task_id="insert_new_data",
         gcp_conn_id=GCP_CONN_ID,
         configuration={
             "load": {
-                "sourceUris": ["{{ ti.xcom_pull(task_ids='prepare_insert') }}"],
+                "sourceUris": ["{{ ti.xcom_pull(task_ids='compute_date_range_and_export') }}"],
                 "destinationTable": {
                     "projectId": BQ_PROJECT,
                     "datasetId": BQ_DATASET,
@@ -217,7 +196,7 @@ def sheets_to_bq_date_update():
         },
     )
 
-    read_data >> compute_date_range() >> delete_period >> prepare_insert() >> insert_new
+    read_data >> compute_date_range_and_export() >> delete_period >> insert_new
 
 
 sheets_to_bq_date_update()

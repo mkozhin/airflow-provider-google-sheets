@@ -1,4 +1,4 @@
-"""Utilities for reading/writing data in various formats (CSV, JSON, list of dicts)."""
+"""Utilities for reading/writing data in various formats (CSV, JSON, JSONL, list of dicts)."""
 
 from __future__ import annotations
 
@@ -67,6 +67,26 @@ def read_json_file(file_path: str) -> tuple[list[str] | None, list[list[Any]]]:
     return None, data
 
 
+def read_jsonl_file(file_path: str) -> tuple[list[str] | None, list[list[Any]]]:
+    """Read a JSONL file (one JSON object per line) and return ``(headers, rows)``."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = [json.loads(line) for line in f if line.strip()]
+    except json.JSONDecodeError as e:
+        raise GoogleSheetsDataError(f"Failed to parse JSONL file '{file_path}': {e}") from e
+    except Exception as e:
+        raise GoogleSheetsDataError(f"Failed to read JSONL file '{file_path}': {e}") from e
+
+    if not data:
+        return None, []
+
+    if isinstance(data[0], dict):
+        return dicts_to_rows(data)
+
+    # Assume list of lists
+    return None, data
+
+
 def write_csv_file(
     file_path: str,
     headers: list[str] | None,
@@ -83,12 +103,12 @@ def write_csv_file(
         raise GoogleSheetsDataError(f"Failed to write CSV file '{file_path}': {e}") from e
 
 
-def write_json_file(
+def write_jsonl_file(
     file_path: str,
     headers: list[str] | None,
     rows: list[list[Any]],
 ) -> None:
-    """Write data to a JSON file as newline-delimited JSON (one JSON object per line)."""
+    """Write data to a JSONL file (one JSON object per line)."""
     try:
         if headers:
             data = rows_to_dicts(rows, headers)
@@ -99,6 +119,25 @@ def write_json_file(
             for item in data:
                 json.dump(item, f, ensure_ascii=False, default=str)
                 f.write("\n")
+    except Exception as e:
+        raise GoogleSheetsDataError(f"Failed to write JSONL file '{file_path}': {e}") from e
+
+
+def write_json_file(
+    file_path: str,
+    headers: list[str] | None,
+    rows: list[list[Any]],
+) -> None:
+    """Write data to a JSON file as a JSON array."""
+    try:
+        if headers:
+            data = rows_to_dicts(rows, headers)
+        else:
+            data = rows
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, default=str)
+            f.write("\n")
     except Exception as e:
         raise GoogleSheetsDataError(f"Failed to write JSON file '{file_path}': {e}") from e
 
@@ -150,14 +189,16 @@ def normalize_input_data(
     """Universal normalizer: accept various input formats and return ``(headers, rows)``.
 
     Supported *source_type* values:
-    - ``"auto"`` — detect from *data* type or *file_path* extension
+    - ``"auto"`` — detect from *data* type; file paths default to JSONL
     - ``"csv"`` — read from CSV file at *file_path*
-    - ``"json"`` — read from JSON file at *file_path*
+    - ``"json"`` — read from JSON array file at *file_path*
+    - ``"jsonl"`` — read from JSONL file at *file_path*
     - ``"dicts"`` — *data* is ``list[dict]``
     - ``"rows"`` — *data* is ``list[list]``
 
     When *source_type* is ``"auto"``:
     - If *data* is a ``str``, it is treated as a file path.
+      ``.csv`` files are read as CSV; all other extensions default to JSONL.
     - If *data* is a ``list[dict]``, it is treated as dicts.
     - If *data* is a ``list[list]``, it is treated as rows.
     """
@@ -171,6 +212,11 @@ def normalize_input_data(
         if file_path is None:
             raise GoogleSheetsDataError("file_path is required for source_type='json'")
         return read_json_file(file_path)
+
+    if source_type == "jsonl":
+        if file_path is None:
+            raise GoogleSheetsDataError("file_path is required for source_type='jsonl'")
+        return read_jsonl_file(file_path)
 
     if source_type == "dicts":
         if not isinstance(data, list):
@@ -190,9 +236,9 @@ def normalize_input_data(
         if isinstance(data, str):
             path = file_path or data
             ext = os.path.splitext(path)[1].lower()
-            if ext == ".json":
-                return read_json_file(path)
-            return read_csv_file(path, has_headers=has_headers)
+            if ext == ".csv":
+                return read_csv_file(path, has_headers=has_headers)
+            return read_jsonl_file(path)
 
         # list[dict]
         if isinstance(data, list) and data and isinstance(data[0], dict):

@@ -21,10 +21,16 @@ logger = logging.getLogger(__name__)
 class GoogleSheetsReadOperator(BaseOperator):
     """Read data from a Google Sheets spreadsheet.
 
-    Data is read in chunks to handle large sheets.  For ``csv`` / ``json``
-    output the chunks are streamed directly to the file without accumulating
-    the entire dataset in memory.  For ``xcom`` output, rows are collected
-    in memory (subject to *max_xcom_rows* limit).
+    Data is read in chunks to handle large sheets.  For ``csv`` / ``json`` /
+    ``jsonl`` output the chunks are streamed directly to the file without
+    accumulating the entire dataset in memory.  For ``xcom`` output, rows are
+    collected in memory (subject to *max_xcom_rows* limit).
+
+    Supported ``output_type`` values:
+    - ``"xcom"`` (default) — return data as a Python object via XCom
+    - ``"csv"`` — stream to a CSV file
+    - ``"json"`` — stream to a JSON array file
+    - ``"jsonl"`` — stream to a JSONL file (one JSON object per line)
 
     Args:
         gcp_conn_id: Airflow Connection ID for the Google service account.
@@ -208,6 +214,8 @@ class GoogleSheetsReadOperator(BaseOperator):
             return self._stream_to_csv(hook, headers, data_start_row)
         if self.output_type == "json":
             return self._stream_to_json(hook, headers, data_start_row)
+        if self.output_type == "jsonl":
+            return self._stream_to_jsonl(hook, headers, data_start_row)
         return self._read_to_xcom(hook, headers, data_start_row)
 
     # ------------------------------------------------------------------
@@ -245,6 +253,36 @@ class GoogleSheetsReadOperator(BaseOperator):
             raise ValueError("output_path is required when output_type='json'")
 
         total = 0
+        first = True
+        with open(self.output_path, "w", encoding="utf-8") as f:
+            f.write("[")
+            for chunk in self._read_chunks(hook, data_start_row, headers):
+                for row in chunk:
+                    if not first:
+                        f.write(",")
+                    first = False
+                    f.write("\n")
+                    if headers:
+                        obj = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
+                        json.dump(obj, f, ensure_ascii=False, default=str)
+                    else:
+                        json.dump(row, f, ensure_ascii=False, default=str)
+                    total += 1
+            f.write("\n]\n")
+
+        logger.info("Streamed %d rows to JSON %s", total, self.output_path)
+        return self.output_path
+
+    def _stream_to_jsonl(
+        self,
+        hook: GoogleSheetsHook,
+        headers: list[str] | None,
+        data_start_row: int,
+    ) -> str:
+        if not self.output_path:
+            raise ValueError("output_path is required when output_type='jsonl'")
+
+        total = 0
         with open(self.output_path, "w", encoding="utf-8") as f:
             for chunk in self._read_chunks(hook, data_start_row, headers):
                 for row in chunk:
@@ -256,7 +294,7 @@ class GoogleSheetsReadOperator(BaseOperator):
                     f.write("\n")
                     total += 1
 
-        logger.info("Streamed %d rows to JSON %s", total, self.output_path)
+        logger.info("Streamed %d rows to JSONL %s", total, self.output_path)
         return self.output_path
 
     def _read_to_xcom(
