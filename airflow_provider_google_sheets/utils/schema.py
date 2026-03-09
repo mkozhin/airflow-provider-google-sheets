@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from typing import Any
 
@@ -9,6 +10,21 @@ from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError, Goo
 
 # Supported type names
 _SUPPORTED_TYPES = {"str", "int", "float", "date", "datetime", "bool"}
+_NUMERIC_TYPES = {"int", "float"}
+_NUMERIC_RE = re.compile(r"-?\d+\.?\d*")
+
+
+def _clean_numeric_string(value: str) -> str | None:
+    """Extract a numeric substring from *value*.
+
+    Handles comma as decimal separator (``"1,2"`` → ``"1.2"``) and strips
+    non-numeric prefixes/suffixes (``"1000.4 р."`` → ``"1000.4"``).
+
+    Returns ``None`` when no numeric part is found.
+    """
+    value = value.replace(",", ".")
+    match = _NUMERIC_RE.search(value)
+    return match.group(0) if match else None
 
 
 def validate_schema(headers: list[str], schema: dict[str, dict]) -> None:
@@ -37,13 +53,52 @@ def apply_schema_to_value(value: Any, column_schema: dict) -> Any:
 
     Empty / ``None`` values are returned as-is (no conversion attempted).
 
+    For numeric types (``int``, ``float``), if the column schema contains a
+    ``"default"`` key the function switches to *lenient* mode:
+
+    * Comma is accepted as decimal separator (``"1,2"`` → ``1.2``).
+    * Non-numeric prefixes/suffixes are stripped (``"10.2%"`` → ``10.2``).
+    * Values that cannot be parsed as a number return the ``default`` value
+      (typically ``None`` for BigQuery ``NULL`` or ``0``).
+
+    Without ``"default"`` the existing strict behaviour is preserved — a
+    ``GoogleSheetsDataError`` is raised on conversion failure.
+
     Raises:
-        GoogleSheetsDataError: When conversion fails.
+        GoogleSheetsDataError: When conversion fails (strict mode only).
     """
+    col_type = column_schema.get("type", "str")
+    has_default = "default" in column_schema
+
+    # --- Lenient numeric path -------------------------------------------
+    if col_type in _NUMERIC_TYPES and has_default:
+        default = column_schema["default"]
+
+        if value is None or (isinstance(value, str) and value.strip() == ""):
+            return default
+
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if col_type == "int":
+                return int(value)
+            return float(value)
+
+        if isinstance(value, str):
+            cleaned = _clean_numeric_string(value.strip())
+            if cleaned is None:
+                return default
+            try:
+                if col_type == "int":
+                    return int(float(cleaned))
+                return float(cleaned)
+            except (ValueError, TypeError):
+                return default
+
+        return default
+
+    # --- Original path (strict) -----------------------------------------
     if value is None or (isinstance(value, str) and value.strip() == ""):
         return value
 
-    col_type = column_schema.get("type", "str")
     fmt = column_schema.get("format")
 
     try:

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0
+
+- Added `"default"` field to numeric schema columns (`int`, `float`) — enables lenient parsing mode:
+  - Non-numeric values (`"-"`, `"n/a"`, `""`, `" "`) are replaced with the default value (`None` or `0`) instead of raising an error
+  - Comma accepted as decimal separator: `"1,2"` → `1.2`
+  - Non-numeric prefixes and suffixes are stripped automatically: `"1000.4 р."` → `1000.4`, `"10.2%"` → `10.2`
+  - Without `"default"`, existing strict behaviour is preserved (error on invalid values)
+  - `None` default maps to `null` in JSONL/JSON output — compatible with BigQuery nullable columns
+
 ## v0.2.0
 
 - **Breaking:** `output_type="json"` in `GoogleSheetsReadOperator` now writes a valid JSON array (`[{...}, {...}]`). Previously it wrote JSONL — use `output_type="jsonl"` for the old behavior

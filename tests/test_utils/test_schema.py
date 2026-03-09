@@ -120,6 +120,84 @@ class TestApplySchemaToValue:
         assert result == date(2024, 1, 1)
 
 
+class TestLenientNumericParsing:
+    """Tests for numeric columns with ``default`` field (lenient mode)."""
+
+    # --- default=None: non-numeric → None ---
+
+    def test_float_na_returns_none(self):
+        assert apply_schema_to_value("n/a", {"type": "float", "default": None}) is None
+
+    def test_float_dash_returns_none(self):
+        assert apply_schema_to_value("-", {"type": "float", "default": None}) is None
+
+    def test_float_empty_returns_none(self):
+        assert apply_schema_to_value("", {"type": "float", "default": None}) is None
+
+    def test_float_whitespace_returns_none(self):
+        assert apply_schema_to_value("  ", {"type": "float", "default": None}) is None
+
+    def test_float_none_returns_none(self):
+        assert apply_schema_to_value(None, {"type": "float", "default": None}) is None
+
+    def test_int_na_returns_none(self):
+        assert apply_schema_to_value("n/a", {"type": "int", "default": None}) is None
+
+    # --- default=0: non-numeric → 0 ---
+
+    def test_float_na_returns_zero(self):
+        assert apply_schema_to_value("n/a", {"type": "float", "default": 0.0}) == 0.0
+
+    def test_int_dash_returns_zero(self):
+        assert apply_schema_to_value("-", {"type": "int", "default": 0}) == 0
+
+    # --- comma as decimal separator ---
+
+    def test_float_comma_decimal(self):
+        assert apply_schema_to_value("1,2", {"type": "float", "default": None}) == pytest.approx(1.2)
+
+    def test_int_comma_decimal(self):
+        assert apply_schema_to_value("42,0", {"type": "int", "default": None}) == 42
+
+    # --- prefix/suffix stripping ---
+
+    def test_float_suffix_rub(self):
+        assert apply_schema_to_value("1000.4 р.", {"type": "float", "default": None}) == pytest.approx(1000.4)
+
+    def test_float_suffix_percent(self):
+        assert apply_schema_to_value("10.2%", {"type": "float", "default": None}) == pytest.approx(10.2)
+
+    def test_float_prefix_dollar(self):
+        assert apply_schema_to_value("$ 55", {"type": "float", "default": None}) == pytest.approx(55.0)
+
+    def test_int_suffix_stripped(self):
+        assert apply_schema_to_value("100 шт.", {"type": "int", "default": None}) == 100
+
+    # --- normal values still work in lenient mode ---
+
+    def test_float_normal(self):
+        assert apply_schema_to_value("3.14", {"type": "float", "default": None}) == pytest.approx(3.14)
+
+    def test_int_normal(self):
+        assert apply_schema_to_value("42", {"type": "int", "default": None}) == 42
+
+    def test_float_from_python_float(self):
+        assert apply_schema_to_value(3.14, {"type": "float", "default": None}) == pytest.approx(3.14)
+
+    def test_int_from_python_int(self):
+        assert apply_schema_to_value(42, {"type": "int", "default": None}) == 42
+
+    # --- strict mode unchanged (no default) ---
+
+    def test_strict_float_na_raises(self):
+        with pytest.raises(GoogleSheetsDataError):
+            apply_schema_to_value("n/a", {"type": "float"})
+
+    def test_strict_float_comma_raises(self):
+        with pytest.raises(GoogleSheetsDataError):
+            apply_schema_to_value("1,2", {"type": "float"})
+
+
 class TestApplySchemaToRow:
     def test_full_row(self):
         headers = ["date", "amount", "note"]

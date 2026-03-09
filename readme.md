@@ -286,6 +286,24 @@ schema = {
 
 **Supported types:** `str`, `int`, `float`, `date`, `datetime`, `bool`
 
+### Robust numeric parsing
+
+For numeric columns (`int`, `float`) add `"default"` to enable lenient parsing.
+Non-numeric values are replaced with the default instead of raising an error:
+
+```python
+schema = {
+    "revenue": {"type": "float", "default": None},   # "n/a", "-", "" → None
+    "quantity": {"type": "int",   "default": 0},       # "n/a", "-", "" → 0
+}
+```
+
+Lenient mode also handles:
+- Comma as decimal separator: `"1,2"` → `1.2`
+- Prefix/suffix stripping: `"1000.4 р."` → `1000.4`, `"10.2%"` → `10.2`
+
+Without `"default"`, the strict behaviour is preserved (error on invalid values).
+
 ## Examples
 
 See the `examples/` directory for complete DAG examples:
