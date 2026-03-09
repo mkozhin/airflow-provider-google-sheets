@@ -20,9 +20,16 @@ def _clean_numeric_string(value: str) -> str | None:
     Handles comma as decimal separator (``"1,2"`` → ``"1.2"``) and strips
     non-numeric prefixes/suffixes (``"1000.4 р."`` → ``"1000.4"``).
 
+    Space-like characters used as thousands separators are removed before
+    parsing, including regular space, non-breaking space (U+00A0), narrow
+    no-break space (U+202F), and thin space (U+2009) — common in Russian
+    locale and Excel/Google Sheets exports.  For example ``"р.250 000"``
+    and ``"1\u202F234"`` both yield ``"250000"`` / ``"1234"``.
+
     Returns ``None`` when no numeric part is found.
     """
     value = value.replace(",", ".")
+    value = re.sub(r'[\s\u202F\u2009]', '', value)
     match = _NUMERIC_RE.search(value)
     return match.group(0) if match else None
 

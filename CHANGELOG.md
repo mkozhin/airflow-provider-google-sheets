@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.1
+
+- **Fixed:** numeric strings with space-as-thousands-separator were silently truncated — `"р.250 000"` parsed as `250.0` instead of `250000.0`, `"р.2 722"` as `2.0` instead of `2722.0`
+- All common space variants used by Excel / Google Sheets / Russian locale are now stripped before number extraction: regular space, non-breaking space (U+00A0), narrow no-break space (U+202F), thin space (U+2009)
+- Only affects lenient numeric mode (columns with `"default"` in schema); strict mode behaviour unchanged
+
 ## v0.4.0
 
 - Added `strip_strings` parameter to `GoogleSheetsReadOperator` (default `False`) — when `True`, strips leading and trailing whitespace from all string cell values during schema application. Useful when Google Sheets cells contain accidental spaces that cause mismatches in downstream filtering or deduplication.

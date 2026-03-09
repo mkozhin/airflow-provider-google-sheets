@@ -197,6 +197,32 @@ class TestLenientNumericParsing:
         with pytest.raises(GoogleSheetsDataError):
             apply_schema_to_value("1,2", {"type": "float"})
 
+    # --- space as thousands separator ---
+
+    def test_float_space_thousands_separator(self):
+        assert apply_schema_to_value("р.250 000", {"type": "float", "default": 0}) == pytest.approx(250000.0)
+
+    def test_float_space_thousands_separator_small(self):
+        assert apply_schema_to_value("р.2 722", {"type": "float", "default": 0}) == pytest.approx(2722.0)
+
+    def test_int_space_thousands_separator(self):
+        assert apply_schema_to_value("1 946", {"type": "int", "default": 0}) == 1946
+
+    def test_int_multiple_space_separators(self):
+        assert apply_schema_to_value("1 234 567", {"type": "int", "default": 0}) == 1234567
+
+    def test_float_nbsp_thousands_separator(self):
+        # U+00A0 non-breaking space
+        assert apply_schema_to_value("1\xa0000", {"type": "float", "default": 0}) == pytest.approx(1000.0)
+
+    def test_float_narrow_nbsp_thousands_separator(self):
+        # U+202F narrow no-break space (Russian locale, Excel)
+        assert apply_schema_to_value("1\u202F000", {"type": "float", "default": 0}) == pytest.approx(1000.0)
+
+    def test_float_thin_space_thousands_separator(self):
+        # U+2009 thin space
+        assert apply_schema_to_value("1\u2009000", {"type": "float", "default": 0}) == pytest.approx(1000.0)
+
 
 class TestApplySchemaToRow:
     def test_full_row(self):
