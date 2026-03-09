@@ -48,7 +48,7 @@ def validate_schema(headers: list[str], schema: dict[str, dict]) -> None:
             )
 
 
-def apply_schema_to_value(value: Any, column_schema: dict) -> Any:
+def apply_schema_to_value(value: Any, column_schema: dict, strip_strings: bool = False) -> Any:
     """Convert a single cell value according to *column_schema*.
 
     Empty / ``None`` values are returned as-is (no conversion attempted).
@@ -103,7 +103,8 @@ def apply_schema_to_value(value: Any, column_schema: dict) -> Any:
 
     try:
         if col_type == "str":
-            return str(value)
+            result = str(value)
+            return result.strip() if strip_strings else result
 
         if col_type == "int":
             return int(float(value))
@@ -151,6 +152,7 @@ def apply_schema_to_row(
     row: list[Any],
     headers: list[str],
     schema: dict[str, dict],
+    strip_strings: bool = False,
 ) -> list[Any]:
     """Apply schema conversions to an entire row.
 
@@ -160,7 +162,7 @@ def apply_schema_to_row(
     for i, value in enumerate(row):
         if i < len(headers) and headers[i] in schema:
             try:
-                result.append(apply_schema_to_value(value, schema[headers[i]]))
+                result.append(apply_schema_to_value(value, schema[headers[i]], strip_strings=strip_strings))
             except GoogleSheetsDataError as e:
                 raise GoogleSheetsDataError(
                     f"Column '{headers[i]}' (index {i}): {e}"

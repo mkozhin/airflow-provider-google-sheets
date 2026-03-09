@@ -275,3 +275,40 @@ class TestFormatRowForWrite:
         schema = {"a": {"type": "str"}}
         result = format_row_for_write([None], headers, schema)
         assert result == [""]
+
+
+class TestStripStrings:
+    def test_leading_space_stripped(self):
+        result = apply_schema_to_value(" bonus", {"type": "str"}, strip_strings=True)
+        assert result == "bonus"
+
+    def test_trailing_space_stripped(self):
+        result = apply_schema_to_value("bonus ", {"type": "str"}, strip_strings=True)
+        assert result == "bonus"
+
+    def test_both_sides_stripped(self):
+        result = apply_schema_to_value("  Дмитров Дом  ", {"type": "str"}, strip_strings=True)
+        assert result == "Дмитров Дом"
+
+    def test_spaces_preserved_when_false(self):
+        result = apply_schema_to_value(" bonus ", {"type": "str"}, strip_strings=False)
+        assert result == " bonus "
+
+    def test_default_preserves_spaces(self):
+        result = apply_schema_to_value(" bonus ", {"type": "str"})
+        assert result == " bonus "
+
+    def test_clean_value_unchanged(self):
+        result = apply_schema_to_value("bonus", {"type": "str"}, strip_strings=True)
+        assert result == "bonus"
+
+    def test_numeric_type_unaffected(self):
+        result = apply_schema_to_value(42, {"type": "int", "default": 0}, strip_strings=True)
+        assert result == 42
+
+    def test_apply_schema_to_row_str_trimmed_numeric_untouched(self):
+        headers = ["bonus", "amount"]
+        schema = {"bonus": {"type": "str"}, "amount": {"type": "int", "default": 0}}
+        row = [" bonus ", 100]
+        result = apply_schema_to_row(row, headers, schema, strip_strings=True)
+        assert result == ["bonus", 100]

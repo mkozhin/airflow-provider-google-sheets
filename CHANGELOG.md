@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.0
+
+- Added `strip_strings` parameter to `GoogleSheetsReadOperator` (default `False`) — when `True`, strips leading and trailing whitespace from all string cell values during schema application. Useful when Google Sheets cells contain accidental spaces that cause mismatches in downstream filtering or deduplication.
+
 ## v0.3.0
 
 - Added `"default"` field to numeric schema columns (`int`, `float`) — enables lenient parsing mode:

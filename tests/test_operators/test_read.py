@@ -435,6 +435,39 @@ class TestSchemaApplication:
         with pytest.raises(GoogleSheetsSchemaError):
             op.execute(context)
 
+    def test_strip_strings_true_trims_whitespace(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["project", "bonus"]],
+            [[" Дмитров Дом ", " bonus"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            schema={"project": {"type": "str"}, "bonus": {"type": "str"}},
+            strip_strings=True,
+        )
+        result = op.execute(context)
+        assert result[0]["project"] == "Дмитров Дом"
+        assert result[0]["bonus"] == "bonus"
+
+    def test_strip_strings_false_preserves_whitespace(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["bonus"]],
+            [[" bonus "]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            schema={"bonus": {"type": "str"}},
+            strip_strings=False,
+        )
+        result = op.execute(context)
+        assert result[0]["bonus"] == " bonus "
+
 
 # ------------------------------------------------------------------
 # Output types

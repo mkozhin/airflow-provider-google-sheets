@@ -145,6 +145,7 @@ read_raw = GoogleSheetsReadOperator(
 | `normalize_headers` | bool | `False` | Нормализовать в snake_case (перекрывает `sanitize` + `lowercase`) |
 | `column_mapping` | dict | `None` | Переименование по оригинальным именам: `{"Исходный": "new_name"}`. Пропускает всю обработку |
 | `schema` | dict | `None` | Схема типов столбцов |
+| `strip_strings` | bool | `False` | Удалять пробелы в начале и конце строковых значений ячеек |
 | `chunk_size` | int | `5000` | Строк за один API-запрос |
 | `output_type` | str | `"xcom"` | `"xcom"`, `"csv"`, `"json"` (JSON array) или `"jsonl"` (объект на строку) |
 | `output_path` | str | `None` | Путь к файлу для csv/json/jsonl |

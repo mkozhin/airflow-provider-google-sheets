@@ -51,6 +51,8 @@ class GoogleSheetsReadOperator(BaseOperator):
             to the raw header names from the spreadsheet.  Headers not present
             in the mapping are kept as-is.
         schema: Optional column type schema for validation and conversion.
+        strip_strings: If ``True``, strip leading and trailing whitespace from
+            all string cell values.  Defaults to ``False`` (load as-is).
         chunk_size: Number of rows to read per API request.
         output_type: ``"xcom"``, ``"csv"`` or ``"json"``.
         output_path: File path for ``csv`` / ``json`` output.
@@ -79,6 +81,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         lowercase_headers: bool = True,
         column_mapping: dict[str, str] | None = None,
         schema: dict[str, dict] | None = None,
+        strip_strings: bool = False,
         chunk_size: int = 5000,
         output_type: str = "xcom",
         output_path: str | None = None,
@@ -98,6 +101,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         self.lowercase_headers = lowercase_headers
         self.column_mapping = column_mapping
         self.schema = schema
+        self.strip_strings = strip_strings
         self.chunk_size = chunk_size
         self.output_type = output_type
         self.output_path = output_path
@@ -165,7 +169,7 @@ class GoogleSheetsReadOperator(BaseOperator):
                 break
 
             if self.schema and headers:
-                rows = [apply_schema_to_row(row, headers, self.schema) for row in rows]
+                rows = [apply_schema_to_row(row, headers, self.schema, strip_strings=self.strip_strings) for row in rows]
 
             yield rows
 

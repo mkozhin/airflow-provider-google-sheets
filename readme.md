@@ -164,6 +164,7 @@ read_raw = GoogleSheetsReadOperator(
 | `normalize_headers` | bool | `False` | Normalize to snake_case (overrides `sanitize` + `lowercase`) |
 | `column_mapping` | dict | `None` | Rename headers using raw names: `{"Original": "new_name"}`. Skips all other processing |
 | `schema` | dict | `None` | Column type schema |
+| `strip_strings` | bool | `False` | Strip leading/trailing whitespace from string cell values |
 | `chunk_size` | int | `5000` | Rows per API request |
 | `output_type` | str | `"xcom"` | `"xcom"`, `"csv"`, `"json"` (JSON array), or `"jsonl"` (one object per line) |
 | `output_path` | str | `None` | File path for csv/json/jsonl output |
