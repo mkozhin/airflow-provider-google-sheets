@@ -11,6 +11,7 @@ from httplib2 import Response
 from airflow_provider_google_sheets.operators.manage import (
     GoogleSheetsCreateSheetOperator,
     GoogleSheetsCreateSpreadsheetOperator,
+    GoogleSheetsListSheetsOperator,
 )
 
 
@@ -159,3 +160,105 @@ class TestCreateSheet:
             )
             op.execute(context)
             hook_cls.assert_called_once_with(gcp_conn_id="my_custom_conn")
+
+
+# ------------------------------------------------------------------
+# ListSheets
+# ------------------------------------------------------------------
+
+METADATA_RESPONSE = {
+    "sheets": [
+        {"properties": {"title": "Data", "index": 0}},
+        {"properties": {"title": "Summary", "index": 1}},
+        {"properties": {"title": "Logs", "index": 2}},
+        {"properties": {"title": "_Hidden", "index": 3}},
+        {"properties": {"title": "Archive_2024", "index": 4}},
+    ]
+}
+
+
+class TestListSheets:
+    def test_returns_all_sheets(self, mock_hook, context):
+        mock_hook.get_spreadsheet_metadata.return_value = METADATA_RESPONSE
+
+        op = GoogleSheetsListSheetsOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+        )
+        result = op.execute(context)
+
+        assert result == ["Data", "Summary", "Logs", "_Hidden", "Archive_2024"]
+
+    def test_name_pattern_filter(self, mock_hook, context):
+        mock_hook.get_spreadsheet_metadata.return_value = METADATA_RESPONSE
+
+        op = GoogleSheetsListSheetsOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            name_pattern=r"^(Data|Summary)$",
+        )
+        result = op.execute(context)
+
+        assert result == ["Data", "Summary"]
+
+    def test_name_pattern_no_match(self, mock_hook, context):
+        mock_hook.get_spreadsheet_metadata.return_value = METADATA_RESPONSE
+
+        op = GoogleSheetsListSheetsOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            name_pattern=r"^NonExistent$",
+        )
+        result = op.execute(context)
+
+        assert result == []
+
+    def test_exclude_pattern(self, mock_hook, context):
+        mock_hook.get_spreadsheet_metadata.return_value = METADATA_RESPONSE
+
+        op = GoogleSheetsListSheetsOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            exclude_pattern=r"^_",
+        )
+        result = op.execute(context)
+
+        assert result == ["Data", "Summary", "Logs", "Archive_2024"]
+
+    def test_index_range(self, mock_hook, context):
+        mock_hook.get_spreadsheet_metadata.return_value = METADATA_RESPONSE
+
+        op = GoogleSheetsListSheetsOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            index_range=(1, 3),
+        )
+        result = op.execute(context)
+
+        assert result == ["Summary", "Logs"]
+
+    def test_combined_filters(self, mock_hook, context):
+        mock_hook.get_spreadsheet_metadata.return_value = METADATA_RESPONSE
+
+        op = GoogleSheetsListSheetsOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            index_range=(0, 4),
+            name_pattern=r"[A-Z]",
+            exclude_pattern=r"^_",
+        )
+        result = op.execute(context)
+
+        assert result == ["Data", "Summary", "Logs"]
+
+    def test_returns_list_of_strings(self, mock_hook, context):
+        mock_hook.get_spreadsheet_metadata.return_value = METADATA_RESPONSE
+
+        op = GoogleSheetsListSheetsOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+        )
+        result = op.execute(context)
+
+        assert isinstance(result, list)
+        assert all(isinstance(s, str) for s in result)

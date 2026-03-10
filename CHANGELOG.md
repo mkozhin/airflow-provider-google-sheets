@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.0
+
+- Added `GoogleSheetsListSheetsOperator` — returns a `list[str]` of sheet (tab) names from a spreadsheet, with optional filtering by `name_pattern` (regex include), `exclude_pattern` (regex exclude), and `index_range` (positional slice). Compatible with Airflow dynamic task mapping (`expand(sheet_name=op.output)`)
+- Added `row_skip` parameter to `GoogleSheetsReadOperator` — skip (filter out) rows matching condition(s) during reading. Accepts a single `dict` or `list[dict]` with `column`, `value`, and optional `op` (supports: `equals`, `not_equals`, `contains`, `not_contains`, `starts_with`, `ends_with`, `empty`, `not_empty`). Multiple conditions use OR logic
+- Added `row_stop` parameter to `GoogleSheetsReadOperator` — stop reading when a matching row is found (the matching row and all subsequent rows are discarded). No further API calls are made after the stop condition triggers, saving quota and time on large sheets
+- `row_skip` and `row_stop` can be used together: stop is applied first, then skip filters the remaining rows
+
 ## v0.4.1
 
 - **Fixed:** numeric strings with space-as-thousands-separator were silently truncated — `"р.250 000"` parsed as `250.0` instead of `250000.0`, `"р.2 722"` as `2.0` instead of `2722.0`

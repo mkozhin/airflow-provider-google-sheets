@@ -13,7 +13,7 @@ Apache Airflow provider for Google Sheets API v4. Read, write, and manage Google
 - **Read** data from Google Sheets with chunked streaming, schema-based type conversion, and CSV/JSON/JSONL/XCom output
 - **Write** data in three modes: overwrite, append, and smart merge (upsert by key)
 - **Smart merge** — update, insert, and delete rows based on a key column with correct index recalculation
-- **Manage** spreadsheets — create new spreadsheets and sheets
+- **Manage** spreadsheets — create new spreadsheets, sheets, and list sheets with filtering
 - **Large datasets** — streaming read/write without loading everything into memory
 - **Schema support** — automatic type conversion (date, int, float, bool) on read and write
 - **Header processing** — deduplication, Cyrillic transliteration (on by default), special character removal, lowercase conversion, snake_case normalization
@@ -147,6 +147,25 @@ read_raw = GoogleSheetsReadOperator(
     sanitize_headers=False,
     lowercase_headers=False,
 )
+
+# Skip rows where status is "deleted" and stop reading at "ИТОГО"
+read_filtered = GoogleSheetsReadOperator(
+    task_id="read_filtered",
+    spreadsheet_id="your-spreadsheet-id",
+    row_skip={"column": "status", "value": "deleted"},
+    row_stop={"column": "name", "value": "ИТОГО"},
+)
+
+# Skip multiple conditions (OR logic)
+read_multi_skip = GoogleSheetsReadOperator(
+    task_id="read_multi_skip",
+    spreadsheet_id="your-spreadsheet-id",
+    row_skip=[
+        {"column": "status", "value": "deleted"},
+        {"column": "status", "value": "archived"},
+        {"column": "amount", "op": "empty"},
+    ],
+)
 ```
 
 **Parameters:**
@@ -165,6 +184,8 @@ read_raw = GoogleSheetsReadOperator(
 | `column_mapping` | dict | `None` | Rename headers using raw names: `{"Original": "new_name"}`. Skips all other processing |
 | `schema` | dict | `None` | Column type schema |
 | `strip_strings` | bool | `False` | Strip leading/trailing whitespace from string cell values |
+| `row_skip` | dict \| list[dict] | `None` | Condition(s) to skip rows: `{"column": "status", "value": "deleted", "op": "equals"}`. Multiple dicts = OR logic |
+| `row_stop` | dict \| list[dict] | `None` | Condition(s) to stop reading: rows from the first match onward are discarded, no further API calls |
 | `chunk_size` | int | `5000` | Rows per API request |
 | `output_type` | str | `"xcom"` | `"xcom"`, `"csv"`, `"json"` (JSON array), or `"jsonl"` (one object per line) |
 | `output_path` | str | `None` | File path for csv/json/jsonl output |
@@ -270,6 +291,45 @@ add_sheet = GoogleSheetsCreateSheetOperator(
     sheet_title="NewSheet",
 )
 ```
+
+### GoogleSheetsListSheetsOperator
+
+List sheet (tab) names of a spreadsheet with optional filtering. Returns `list[str]`, compatible with Airflow dynamic task mapping.
+
+```python
+from airflow_provider_google_sheets.operators.manage import GoogleSheetsListSheetsOperator
+
+# List all sheets
+list_sheets = GoogleSheetsListSheetsOperator(
+    task_id="list_sheets",
+    spreadsheet_id="your-spreadsheet-id",
+)
+
+# Filter by regex and use with dynamic task mapping
+list_data_sheets = GoogleSheetsListSheetsOperator(
+    task_id="list_data_sheets",
+    spreadsheet_id="your-spreadsheet-id",
+    name_pattern=r"^Data",          # include only sheets starting with "Data"
+    exclude_pattern=r"_archive$",   # exclude sheets ending with "_archive"
+    index_range=(0, 10),            # only first 10 sheets
+)
+
+# Dynamic task mapping — read each sheet in parallel
+read_each = GoogleSheetsReadOperator.partial(
+    task_id="read_each",
+    spreadsheet_id="your-spreadsheet-id",
+).expand(sheet_name=list_data_sheets.output)
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `gcp_conn_id` | str | `"google_cloud_default"` | Airflow Connection ID |
+| `spreadsheet_id` | str | — | Spreadsheet ID |
+| `name_pattern` | str | `None` | Regex to include sheets by name (`re.search`) |
+| `exclude_pattern` | str | `None` | Regex to exclude sheets by name (`re.search`) |
+| `index_range` | tuple[int, int] | `None` | Positional slice `(start, end)`, 0-based, start inclusive, end exclusive |
 
 ## Schema
 

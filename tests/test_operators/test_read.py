@@ -774,3 +774,152 @@ class TestRangeBuildingFix:
         )
         result = op._build_header_range()
         assert result == "1:1"
+
+
+# ------------------------------------------------------------------
+# Row filtering (row_skip / row_stop)
+# ------------------------------------------------------------------
+
+
+class TestRowSkip:
+    def test_skip_rows_by_value(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["status", "value"]],
+            [["active", "10"], ["deleted", "20"], ["active", "30"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            row_skip={"column": "status", "value": "deleted"},
+        )
+        result = op.execute(context)
+
+        assert result == [
+            {"status": "active", "value": "10"},
+            {"status": "active", "value": "30"},
+        ]
+
+    def test_skip_multiple_conditions_or(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["status", "value"]],
+            [["active", "10"], ["deleted", "20"], ["archived", "30"], ["active", "40"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            row_skip=[
+                {"column": "status", "value": "deleted"},
+                {"column": "status", "value": "archived"},
+            ],
+        )
+        result = op.execute(context)
+
+        assert result == [
+            {"status": "active", "value": "10"},
+            {"status": "active", "value": "40"},
+        ]
+
+
+class TestRowStop:
+    def test_stop_at_matching_row(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["name", "amount"]],
+            [["Item1", "100"], ["Item2", "200"], ["ИТОГО", "300"], ["Extra", "400"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            row_stop={"column": "name", "value": "ИТОГО"},
+        )
+        result = op.execute(context)
+
+        assert result == [
+            {"name": "Item1", "amount": "100"},
+            {"name": "Item2", "amount": "200"},
+        ]
+
+    def test_stop_no_extra_api_calls(self, mock_hook, context):
+        """When row_stop triggers in the first chunk, no further API calls."""
+        mock_hook.get_values.side_effect = [
+            [["name", "amount"]],
+            [["Item1", "100"], ["ИТОГО", "300"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            chunk_size=5000,
+            row_stop={"column": "name", "value": "ИТОГО"},
+        )
+        op.execute(context)
+
+        # 1 call for headers + 1 call for data chunk = 2 total
+        assert mock_hook.get_values.call_count == 2
+
+    def test_stop_mid_chunk_no_further_chunks(self, mock_hook, context):
+        """row_stop in chunk prevents fetching the next chunk."""
+        chunk1 = [["Row1", "a"], ["ИТОГО", "b"]]
+        chunk2_should_not_be_called = [["Row3", "c"]]
+
+        mock_hook.get_values.side_effect = [
+            [["name", "value"]],
+            chunk1,
+            chunk2_should_not_be_called,
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            chunk_size=2,
+            row_stop={"column": "name", "value": "ИТОГО"},
+        )
+        result = op.execute(context)
+
+        assert result == [{"name": "Row1", "value": "a"}]
+        # Only header + first data chunk fetched
+        assert mock_hook.get_values.call_count == 2
+
+
+class TestRowStopAndSkipCombined:
+    def test_stop_and_skip_together(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["name", "status"]],
+            [
+                ["Item1", "active"],
+                ["Item2", "deleted"],
+                ["Item3", "active"],
+                ["ИТОГО", ""],
+                ["Extra", "active"],
+            ],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            row_skip={"column": "status", "value": "deleted"},
+            row_stop={"column": "name", "value": "ИТОГО"},
+        )
+        result = op.execute(context)
+
+        assert result == [
+            {"name": "Item1", "status": "active"},
+            {"name": "Item3", "status": "active"},
+        ]
+
+
+class TestRowFilterValidation:
+    def test_invalid_condition_raises_before_reading(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["name", "value"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            row_skip={"column": "name", "op": "like", "value": "x"},
+        )
+        with pytest.raises(ValueError, match="unknown op 'like'"):
+            op.execute(context)

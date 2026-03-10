@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Sequence
 
 from airflow.models import BaseOperator
@@ -90,3 +91,60 @@ class GoogleSheetsCreateSheetOperator(BaseOperator):
             self.spreadsheet_id,
         )
         return result
+
+
+class GoogleSheetsListSheetsOperator(BaseOperator):
+    """List sheet (tab) names of a Google Sheets spreadsheet.
+
+    Returns a ``list[str]`` of sheet names, compatible with Airflow dynamic
+    task mapping (``expand(sheet_name=op.output)``).
+
+    Args:
+        gcp_conn_id: Airflow Connection ID.
+        spreadsheet_id: Target spreadsheet ID.
+        name_pattern: Regex to include sheets by name (``re.search``).
+        exclude_pattern: Regex to exclude sheets by name (``re.search``).
+        index_range: ``(start, end)`` slice by sheet position (0-based,
+            start inclusive, end exclusive).
+    """
+
+    template_fields: Sequence[str] = ("spreadsheet_id", "name_pattern", "exclude_pattern")
+
+    def __init__(
+        self,
+        *,
+        gcp_conn_id: str = "google_cloud_default",
+        spreadsheet_id: str,
+        name_pattern: str | None = None,
+        exclude_pattern: str | None = None,
+        index_range: tuple[int, int] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.gcp_conn_id = gcp_conn_id
+        self.spreadsheet_id = spreadsheet_id
+        self.name_pattern = name_pattern
+        self.exclude_pattern = exclude_pattern
+        self.index_range = index_range
+
+    def execute(self, context: Any) -> list[str]:
+        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
+        meta = hook.get_spreadsheet_metadata(self.spreadsheet_id)
+        sheets = [s["properties"]["title"] for s in meta.get("sheets", [])]
+
+        if self.index_range is not None:
+            start, end = self.index_range
+            sheets = sheets[start:end]
+
+        if self.name_pattern is not None:
+            sheets = [s for s in sheets if re.search(self.name_pattern, s)]
+
+        if self.exclude_pattern is not None:
+            sheets = [s for s in sheets if not re.search(self.exclude_pattern, s)]
+
+        logger.info(
+            "Listed %d sheets in spreadsheet '%s'",
+            len(sheets),
+            self.spreadsheet_id,
+        )
+        return sheets
