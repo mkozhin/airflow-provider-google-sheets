@@ -264,7 +264,12 @@ class TestDataSources:
 
 
 class TestSmartMerge:
-    """Tests for the smart_merge write mode."""
+    """Tests for the smart_merge write mode.
+
+    Strategy: for each key value present in incoming data —
+    delete ALL existing rows with that key, then append all incoming rows.
+    Keys absent from incoming data are left untouched.
+    """
 
     def _make_op(self, data, merge_key="date", **kwargs):
         defaults = dict(
@@ -278,153 +283,111 @@ class TestSmartMerge:
         defaults.update(kwargs)
         return GoogleSheetsWriteOperator(data=data, **defaults)
 
-    def test_same_row_count_updates_in_place(self, mock_hook, context):
-        """3 existing rows for 2024-04-01, 3 incoming → pure update."""
+    def test_existing_key_deletes_and_appends(self, mock_hook, context):
+        """Key exists in sheet → delete all existing rows, append incoming."""
         mock_hook.get_values.return_value = [
-            ["date"],           # header (row 1)
-            ["2024-04-01"],     # row 2
-            ["2024-04-01"],     # row 3
-            ["2024-04-01"],     # row 4
+            ["date"],
+            ["2024-04-01"],  # row 2
+            ["2024-04-01"],  # row 3
         ]
-
         incoming = [
             {"date": "2024-04-01", "val": "new1"},
             {"date": "2024-04-01", "val": "new2"},
-            {"date": "2024-04-01", "val": "new3"},
         ]
         op = self._make_op(incoming)
         result = op.execute(context)
 
-        assert result["updated"] == 3
-        assert result["inserted"] == 0
-        assert result["deleted"] == 0
-        assert mock_hook.batch_update.call_count == 0  # no structural changes
-
-    def test_more_incoming_inserts_rows(self, mock_hook, context):
-        """2 existing, 4 incoming → update 2 + insert 2."""
-        mock_hook.get_values.return_value = [
-            ["date"],
-            ["2024-04-01"],  # row 2
-            ["2024-04-01"],  # row 3
-        ]
-
-        incoming = [
-            {"date": "2024-04-01", "val": "a"},
-            {"date": "2024-04-01", "val": "b"},
-            {"date": "2024-04-01", "val": "c"},
-            {"date": "2024-04-01", "val": "d"},
-        ]
-        op = self._make_op(incoming)
-        result = op.execute(context)
-
-        assert result["updated"] == 2
-        assert result["inserted"] == 2
-        # insertDimension should have been called via batch_update
-        mock_hook.batch_update.assert_called()
-
-    def test_fewer_incoming_deletes_rows(self, mock_hook, context):
-        """3 existing, 1 incoming → update 1 + delete 2."""
-        mock_hook.get_values.return_value = [
-            ["date"],
-            ["2024-04-01"],  # row 2
-            ["2024-04-01"],  # row 3
-            ["2024-04-01"],  # row 4
-        ]
-
-        incoming = [{"date": "2024-04-01", "val": "only"}]
-        op = self._make_op(incoming)
-        result = op.execute(context)
-
-        assert result["updated"] == 1
         assert result["deleted"] == 2
+        assert result["appended"] == 2
         mock_hook.batch_update.assert_called()
-        # Check that deleteDimension was in the request
-        batch_args = mock_hook.batch_update.call_args[0][1]
-        assert any("deleteDimension" in r for r in batch_args)
+        mock_hook.append_values.assert_called()
 
-    def test_new_key_appends(self, mock_hook, context):
-        """Key not in existing data → append."""
+    def test_existing_key_different_row_count(self, mock_hook, context):
+        """3 existing rows, 5 incoming → delete 3, append 5."""
+        mock_hook.get_values.return_value = [
+            ["date"],
+            ["2024-04-01"],
+            ["2024-04-01"],
+            ["2024-04-01"],
+        ]
+        incoming = [{"date": "2024-04-01", "val": str(i)} for i in range(5)]
+        op = self._make_op(incoming)
+        result = op.execute(context)
+
+        assert result["deleted"] == 3
+        assert result["appended"] == 5
+
+    def test_new_key_only_appends(self, mock_hook, context):
+        """Key not in sheet → no deletes, just append."""
         mock_hook.get_values.return_value = [
             ["date"],
             ["2024-04-01"],
         ]
-
         incoming = [{"date": "2024-04-02", "val": "new"}]
         op = self._make_op(incoming)
         result = op.execute(context)
 
+        assert result["deleted"] == 0
         assert result["appended"] == 1
+        mock_hook.batch_update.assert_not_called()
         mock_hook.append_values.assert_called()
 
-    def test_mixed_update_and_append(self, mock_hook, context):
-        """Some keys exist, some are new."""
+    def test_key_in_sheet_not_in_incoming_is_untouched(self, mock_hook, context):
+        """Key only in sheet (not incoming) → left as-is."""
         mock_hook.get_values.return_value = [
             ["date"],
-            ["2024-04-01"],  # row 2
+            ["2024-04-01"],  # not in incoming → should NOT be deleted
         ]
+        incoming = [{"date": "2024-04-02", "val": "new"}]
+        op = self._make_op(incoming)
+        result = op.execute(context)
 
+        assert result["deleted"] == 0
+        assert result["appended"] == 1
+
+    def test_multiple_keys_mixed(self, mock_hook, context):
+        """Some keys exist (delete+append), some are new (append only)."""
+        mock_hook.get_values.return_value = [
+            ["date"],
+            ["2024-04-01"],  # row 2 — will be replaced
+            ["2024-04-01"],  # row 3
+        ]
         incoming = [
-            {"date": "2024-04-01", "val": "updated"},
-            {"date": "2024-04-02", "val": "new"},
+            {"date": "2024-04-01", "val": "a"},
+            {"date": "2024-04-01", "val": "b"},
+            {"date": "2024-04-02", "val": "c"},  # new key
         ]
         op = self._make_op(incoming)
         result = op.execute(context)
 
-        assert result["updated"] == 1
-        assert result["appended"] == 1
+        assert result["deleted"] == 2
+        assert result["appended"] == 3
 
     def test_bottom_up_ordering_for_deletes(self, mock_hook, context):
-        """Multiple delete groups should be processed bottom-up."""
+        """Delete operations for multiple keys must be sorted bottom-up."""
         mock_hook.get_values.return_value = [
             ["date"],
             ["2024-04-01"],  # row 2
             ["2024-04-01"],  # row 3
-            ["2024-04-01"],  # row 4
+            ["2024-04-05"],  # row 4
             ["2024-04-05"],  # row 5
-            ["2024-04-05"],  # row 6
-            ["2024-04-05"],  # row 7
         ]
-
         incoming = [
-            {"date": "2024-04-01", "val": "a"},   # was 3, now 1 → delete 2
-            {"date": "2024-04-05", "val": "b"},   # was 3, now 1 → delete 2
+            {"date": "2024-04-01", "val": "a"},
+            {"date": "2024-04-05", "val": "b"},
         ]
         op = self._make_op(incoming)
         result = op.execute(context)
 
-        assert result["deleted"] == 4  # 2 + 2
+        assert result["deleted"] == 4
 
-        # Verify bottom-up: the batch_update should contain delete for
-        # rows 6-7 before rows 3-4
         batch_args = mock_hook.batch_update.call_args[0][1]
         delete_starts = [
             r["deleteDimension"]["range"]["startIndex"]
             for r in batch_args
             if "deleteDimension" in r
         ]
-        # Should be sorted descending
         assert delete_starts == sorted(delete_starts, reverse=True)
-
-    def test_non_unique_keys(self, mock_hook, context):
-        """Multiple rows per key value — all should be handled."""
-        mock_hook.get_values.return_value = [
-            ["id"],
-            ["A"],  # row 2
-            ["A"],  # row 3
-            ["B"],  # row 4
-        ]
-
-        incoming = [
-            {"id": "A", "val": "a1"},
-            {"id": "A", "val": "a2"},
-            {"id": "B", "val": "b1"},
-            {"id": "B", "val": "b2"},
-        ]
-        op = self._make_op(incoming, merge_key="id")
-        result = op.execute(context)
-
-        assert result["updated"] >= 3  # at least 2 for A + 1 for B
-        assert result["inserted"] >= 1  # B had 1, now 2
 
     def test_missing_merge_key_raises(self, mock_hook, context):
         op = GoogleSheetsWriteOperator(
@@ -447,16 +410,9 @@ class TestSmartMerge:
         with pytest.raises(ValueError, match="not found in headers"):
             op.execute(context)
 
-    def test_empty_incoming_is_noop(self, mock_hook, context):
-        """No incoming data → nothing changes."""
-        mock_hook.get_values.return_value = [["date"], ["2024-04-01"]]
-
-        # Empty list of dicts still provides headers via normalize
-        op = self._make_op([{"date": "2024-04-01", "val": "x"}], merge_key="date")
-        # Override with empty rows after normalisation
-        # Simpler: just pass data that won't match anything in incoming
-        # Actually, test the realistic case: empty list of dicts
-        op2 = GoogleSheetsWriteOperator(
+    def test_no_headers_raises(self, mock_hook, context):
+        """smart_merge requires headers."""
+        op = GoogleSheetsWriteOperator(
             task_id="test",
             spreadsheet_id=SPREADSHEET_ID,
             write_mode="smart_merge",
@@ -465,18 +421,16 @@ class TestSmartMerge:
             has_headers=False,
             pause_between_batches=0,
         )
-        # Smart merge requires headers, so empty data without headers is a ValueError
         with pytest.raises(ValueError, match="Headers are required"):
-            op2.execute(context)
+            op.execute(context)
 
     def test_with_sheet_name(self, mock_hook, context):
+        """Key column range must include sheet name prefix."""
         mock_hook.get_values.return_value = [["date"], ["2024-04-01"]]
-
         incoming = [{"date": "2024-04-01", "val": "x"}]
         op = self._make_op(incoming, sheet_name="MySheet")
         op.execute(context)
 
-        # Key column read should include sheet name
         key_range = mock_hook.get_values.call_args[0][1]
         assert key_range.startswith("MySheet!")
 
@@ -704,87 +658,7 @@ class TestParseRangeStart:
 
 
 # ==================================================================
-# Task 7.2 — Index recalculation after structural ops
-# ==================================================================
-
-
-class TestIndexRecalculation:
-    def _make_op(self, data, merge_key="date", **kwargs):
-        defaults = dict(
-            task_id="test",
-            spreadsheet_id=SPREADSHEET_ID,
-            write_mode="smart_merge",
-            merge_key=merge_key,
-            batch_size=1000,
-            pause_between_batches=0,
-        )
-        defaults.update(kwargs)
-        return GoogleSheetsWriteOperator(data=data, **defaults)
-
-    def test_updates_after_insert_are_shifted(self, mock_hook, context):
-        """Insert rows for key A, then update key B which is below — B's row_num
-        must be shifted up by the number of inserted rows."""
-        mock_hook.get_values.return_value = [
-            ["id"],
-            ["A"],      # row 2
-            ["B"],      # row 3
-        ]
-
-        incoming = [
-            {"id": "A", "val": "a1"},
-            {"id": "A", "val": "a2"},  # insert 1 extra row for A
-            {"id": "B", "val": "b_updated"},
-        ]
-        op = self._make_op(incoming, merge_key="id")
-        result = op.execute(context)
-
-        # B was at row 3. After inserting 1 row after row 2, B moved to row 4.
-        assert result["updated"] >= 2  # A(row2) + B(shifted)
-        assert result["inserted"] == 1
-
-        # batch_update_values is used now — find the call with B's data
-        all_batch_calls = mock_hook.batch_update_values.call_args_list
-        b_ranges = []
-        for c in all_batch_calls:
-            data = c[0][1]  # list of {"range": ..., "values": ...}
-            for item in data:
-                if item["values"] == [["B", "b_updated"]]:
-                    b_ranges.append(item["range"])
-        assert len(b_ranges) == 1
-        assert "4" in b_ranges[0]
-
-    def test_updates_after_delete_are_shifted(self, mock_hook, context):
-        """Delete rows for key A, then update key B below — B's row shifts up."""
-        mock_hook.get_values.return_value = [
-            ["id"],
-            ["A"],      # row 2
-            ["A"],      # row 3
-            ["A"],      # row 4
-            ["B"],      # row 5
-        ]
-
-        incoming = [
-            {"id": "A", "val": "a1"},  # 3 existing, 1 incoming → delete 2
-            {"id": "B", "val": "b_updated"},
-        ]
-        op = self._make_op(incoming, merge_key="id")
-        result = op.execute(context)
-
-        assert result["deleted"] == 2
-        # B was at row 5. After deleting 2 rows (rows 3-4), B is at row 3.
-        all_batch_calls = mock_hook.batch_update_values.call_args_list
-        b_ranges = []
-        for c in all_batch_calls:
-            data = c[0][1]
-            for item in data:
-                if item["values"] == [["B", "b_updated"]]:
-                    b_ranges.append(item["range"])
-        assert len(b_ranges) == 1
-        assert "3" in b_ranges[0]
-
-
-# ==================================================================
-# Task 7.3 — Non-contiguous row deletion
+# Task 7.2 — Non-contiguous row deletion
 # ==================================================================
 
 
@@ -806,8 +680,8 @@ class TestNonContiguousDeletion:
         assert f([]) == []
 
     def test_non_contiguous_rows_deleted_separately(self, mock_hook, context):
-        """Non-contiguous rows for a key should produce separate delete ops,
-        not one big range that destroys intermediate rows."""
+        """Non-contiguous rows for a key must produce separate delete ops
+        so that intermediate rows belonging to other keys are not destroyed."""
         mock_hook.get_values.return_value = [
             ["id"],
             ["A"],      # row 2
@@ -817,7 +691,7 @@ class TestNonContiguousDeletion:
             ["A"],      # row 6
         ]
 
-        # A has 3 rows (2, 4, 6), incoming has 1 → delete 2 surplus
+        # A has 3 non-contiguous rows (2, 4, 6) → all 3 deleted, 1 appended
         incoming = [{"id": "A", "val": "a1"}]
         op = GoogleSheetsWriteOperator(
             task_id="test",
@@ -829,12 +703,13 @@ class TestNonContiguousDeletion:
         )
         result = op.execute(context)
 
-        assert result["deleted"] == 2
+        assert result["deleted"] == 3
+        assert result["appended"] == 1
 
         # Verify that delete operations are for individual rows, not a merged range
+        # (a merged range would delete "other" and "other2" rows too)
         batch_args = mock_hook.batch_update.call_args[0][1]
         delete_ops = [r["deleteDimension"]["range"] for r in batch_args if "deleteDimension" in r]
-        # Each delete should be a single row, not a range spanning rows 4-6
         for dop in delete_ops:
             span = dop["endIndex"] - dop["startIndex"]
             assert span == 1, f"Expected single-row delete, got span={span}: {dop}"
@@ -847,10 +722,10 @@ class TestNonContiguousDeletion:
 
 class TestDeterministicKeyOrder:
     def test_keys_processed_in_stable_order(self, mock_hook, context):
-        """Keys should be processed in stable order: existing first, then new."""
+        """Keys should be processed without errors; C (not in incoming) stays untouched."""
         mock_hook.get_values.return_value = [
             ["id"],
-            ["C"],   # row 2
+            ["C"],   # row 2 — not in incoming, must stay
             ["A"],   # row 3
             ["B"],   # row 4
         ]
@@ -870,9 +745,9 @@ class TestDeterministicKeyOrder:
         )
         result = op.execute(context)
 
-        # Should work without error and produce deterministic results
-        assert result["updated"] == 2  # A and B
-        assert result["appended"] == 1  # D
+        # A and B deleted + appended; D appended; C left untouched
+        assert result["deleted"] == 2  # A(row3) + B(row4)
+        assert result["appended"] == 3  # a1 + b1 + d1
 
 
 # ==================================================================
@@ -881,19 +756,17 @@ class TestDeterministicKeyOrder:
 
 
 class TestBatchUpdateValuesUsage:
-    def test_smart_merge_uses_batch_update_values(self, mock_hook, context):
-        """Value updates should use batch_update_values, not individual update_values."""
+    def test_smart_merge_uses_batch_update_for_deletes(self, mock_hook, context):
+        """Deletes use batch_update (deleteDimension), not batch_update_values."""
         mock_hook.get_values.return_value = [
             ["id"],
             ["A"],   # row 2
             ["B"],   # row 3
-            ["C"],   # row 4
         ]
 
         incoming = [
             {"id": "A", "val": "a1"},
             {"id": "B", "val": "b1"},
-            {"id": "C", "val": "c1"},
         ]
         op = GoogleSheetsWriteOperator(
             task_id="test",
@@ -905,27 +778,16 @@ class TestBatchUpdateValuesUsage:
         )
         result = op.execute(context)
 
-        assert result["updated"] == 3
-        # batch_update_values should be called (not individual update_values for merge)
-        mock_hook.batch_update_values.assert_called()
-        # All 3 updates in a single batch call
-        batch_data = mock_hook.batch_update_values.call_args[0][1]
-        assert len(batch_data) == 3
+        assert result["deleted"] == 2
+        assert result["appended"] == 2
+        mock_hook.batch_update.assert_called()
+        mock_hook.batch_update_values.assert_not_called()
 
-    def test_batch_update_values_respects_batch_size(self, mock_hook, context):
-        """When updates exceed batch_size, multiple batch_update_values calls are made."""
-        mock_hook.get_values.return_value = [
-            ["id"],
-            ["A"],
-            ["B"],
-            ["C"],
-        ]
+    def test_append_respects_batch_size(self, mock_hook, context):
+        """Append rows should respect batch_size."""
+        mock_hook.get_values.return_value = [["id"]]  # empty sheet
 
-        incoming = [
-            {"id": "A", "val": "a"},
-            {"id": "B", "val": "b"},
-            {"id": "C", "val": "c"},
-        ]
+        incoming = [{"id": str(i), "val": str(i)} for i in range(5)]
         op = GoogleSheetsWriteOperator(
             task_id="test",
             spreadsheet_id=SPREADSHEET_ID,
@@ -937,9 +799,9 @@ class TestBatchUpdateValuesUsage:
         )
         result = op.execute(context)
 
-        assert result["updated"] == 3
-        # 3 updates / batch_size=2 → 2 batch_update_values calls
-        assert mock_hook.batch_update_values.call_count == 2
+        assert result["appended"] == 5
+        # 5 rows / batch_size=2 → 3 append_values calls
+        assert mock_hook.append_values.call_count == 3
 
 
 # ==================================================================
@@ -949,15 +811,15 @@ class TestBatchUpdateValuesUsage:
 
 class TestSmartMergeHasHeaders:
     def test_has_headers_false_processes_row1_as_data(self, mock_hook, context):
-        """When has_headers=False, row 1 is data, not a header to skip."""
+        """When has_headers=False, row 1 is data — both rows should be deleted."""
         mock_hook.get_values.return_value = [
             ["A"],   # row 1 — data, NOT header
             ["B"],   # row 2
         ]
 
         incoming = [
-            {"id": "A", "val": "a_updated"},
-            {"id": "B", "val": "b_updated"},
+            {"id": "A", "val": "a_new"},
+            {"id": "B", "val": "b_new"},
         ]
         op = GoogleSheetsWriteOperator(
             task_id="test",
@@ -968,30 +830,20 @@ class TestSmartMergeHasHeaders:
             has_headers=False,
             pause_between_batches=0,
         )
-        # has_headers=False but smart_merge needs headers from data → dicts provide them
         result = op.execute(context)
 
-        assert result["updated"] == 2
-        # Verify row 1 was indexed (not skipped)
-        batch_data = mock_hook.batch_update_values.call_args[0][1]
-        ranges = [item["range"] for item in batch_data]
-        # Row 1 (A) and row 2 (B) should both be updated
-        row_nums = []
-        for r in ranges:
-            # Extract row number from range like "A1:B1"
-            parts = r.split(":")
-            row_nums.append(int("".join(c for c in parts[0] if c.isdigit())))
-        assert 1 in row_nums  # row 1 must be included
-        assert 2 in row_nums
+        # Both rows indexed (row 1 not skipped), both deleted and re-appended
+        assert result["deleted"] == 2
+        assert result["appended"] == 2
 
     def test_has_headers_true_skips_row1(self, mock_hook, context):
-        """When has_headers=True (default), row 1 is skipped as header."""
+        """When has_headers=True (default), row 1 is the header and is not indexed."""
         mock_hook.get_values.return_value = [
-            ["id"],   # row 1 — header
+            ["id"],   # row 1 — header, must NOT be deleted
             ["A"],    # row 2
         ]
 
-        incoming = [{"id": "A", "val": "updated"}]
+        incoming = [{"id": "A", "val": "new"}]
         op = GoogleSheetsWriteOperator(
             task_id="test",
             spreadsheet_id=SPREADSHEET_ID,
@@ -1002,10 +854,13 @@ class TestSmartMergeHasHeaders:
         )
         result = op.execute(context)
 
-        assert result["updated"] == 1
-        # Update should target row 2, not row 1
-        batch_data = mock_hook.batch_update_values.call_args[0][1]
-        assert "2" in batch_data[0]["range"]
+        # Only row 2 deleted (row 1 header is skipped)
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+        batch_args = mock_hook.batch_update.call_args[0][1]
+        delete_ranges = [r["deleteDimension"]["range"] for r in batch_args if "deleteDimension" in r]
+        # Delete must target row 2 (startIndex=1, endIndex=2), not row 1
+        assert all(d["startIndex"] >= 1 for d in delete_ranges)
 
 
 class TestColumnLetterConversion:
@@ -1038,204 +893,6 @@ class TestUnknownWriteMode:
         )
         with pytest.raises(ValueError, match="Unknown write_mode"):
             op.execute(context)
-
-
-# ==================================================================
-# Task 9.2 — post_insert_updates recalculation after structural ops
-# ==================================================================
-
-
-class TestPostInsertUpdatesRecalculation:
-    """Verify post_insert_updates ranges are recalculated when multiple
-    structural operations shift rows."""
-
-    def _make_op(self, data, merge_key="id", **kwargs):
-        defaults = dict(
-            task_id="test",
-            spreadsheet_id=SPREADSHEET_ID,
-            write_mode="smart_merge",
-            merge_key=merge_key,
-            batch_size=1000,
-            pause_between_batches=0,
-        )
-        defaults.update(kwargs)
-        return GoogleSheetsWriteOperator(data=data, **defaults)
-
-    def _get_post_insert_ranges(self, mock_hook):
-        """Extract ranges written via batch_update_values that correspond
-        to post_insert_updates (called right after structural batch)."""
-        calls = mock_hook.batch_update_values.call_args_list
-        ranges = []
-        for c in calls:
-            data = c[0][1]
-            for item in data:
-                ranges.append(item["range"])
-        return ranges
-
-    def test_delete_above_shifts_post_insert_updates(self, mock_hook, context):
-        """Delete rows above an insert point — post_insert_updates for the
-        inserted rows must shift up by deleted count."""
-        # Existing: A has 3 rows (2,3,4), B has 1 row (5)
-        mock_hook.get_values.return_value = [
-            ["id"],
-            ["A"],      # row 2
-            ["A"],      # row 3
-            ["A"],      # row 4
-            ["B"],      # row 5
-        ]
-
-        # Incoming: A shrinks to 1 (delete 2), B grows to 3 (insert 2)
-        incoming = [
-            {"id": "A", "val": "a1"},
-            {"id": "B", "val": "b1"},
-            {"id": "B", "val": "b2"},
-            {"id": "B", "val": "b3"},
-        ]
-        op = self._make_op(incoming)
-        result = op.execute(context)
-
-        assert result["deleted"] == 2
-        assert result["inserted"] == 2
-
-        # After deleting rows 3-4, B moves from row 5 to row 3.
-        # Insert 2 rows after row 3 → new rows at 4, 5 (0-based: 3, 4).
-        # post_insert_updates should write to rows 4 and 5 (after delete shift).
-        all_ranges = self._get_post_insert_ranges(mock_hook)
-        # Find ranges for the inserted B values (b2, b3)
-        insert_ranges = []
-        for c in mock_hook.batch_update_values.call_args_list:
-            data = c[0][1]
-            for item in data:
-                for val_row in item["values"]:
-                    if val_row[1] in ("b2", "b3"):
-                        insert_ranges.append(item["range"])
-        assert len(insert_ranges) == 2
-        # The row numbers should reflect the shifted position
-        row_nums = sorted(int("".join(c for c in r.split(":")[-1] if c.isdigit()))
-                          for r in insert_ranges)
-        # Rows should be consecutive and correct after shift
-        assert row_nums[1] == row_nums[0] + 1
-
-    def test_two_inserts_mutual_adjustment(self, mock_hook, context):
-        """Two inserts in different parts of the sheet — the upper insert
-        shifts post_insert_updates of the lower insert."""
-        # Existing: A at row 2, B at row 3
-        mock_hook.get_values.return_value = [
-            ["id"],
-            ["A"],      # row 2
-            ["B"],      # row 3
-        ]
-
-        # A grows to 3 (insert 2), B grows to 3 (insert 2)
-        incoming = [
-            {"id": "A", "val": "a1"},
-            {"id": "A", "val": "a2"},
-            {"id": "A", "val": "a3"},
-            {"id": "B", "val": "b1"},
-            {"id": "B", "val": "b2"},
-            {"id": "B", "val": "b3"},
-        ]
-        op = self._make_op(incoming)
-        result = op.execute(context)
-
-        assert result["inserted"] == 4  # 2 for A + 2 for B
-
-        # Collect all post_insert_updates ranges
-        insert_ranges = []
-        for c in mock_hook.batch_update_values.call_args_list:
-            data = c[0][1]
-            for item in data:
-                for val_row in item["values"]:
-                    if val_row[1] in ("a2", "a3", "b2", "b3"):
-                        insert_ranges.append((val_row[1], item["range"]))
-
-        # Extract row numbers
-        row_map = {}
-        for val, rng in insert_ranges:
-            row_num = int("".join(c for c in rng.split(":")[-1] if c.isdigit()))
-            row_map[val] = row_num
-
-        # A inserts after row 2 → rows 3, 4
-        # B was at row 3, after A's insert of 2, B moves to row 5
-        # B inserts after row 5 → rows 6, 7
-        # So: a2→3, a3→4, b2→6, b3→7
-        if "a2" in row_map and "a3" in row_map:
-            assert row_map["a3"] == row_map["a2"] + 1
-        if "b2" in row_map and "b3" in row_map:
-            assert row_map["b3"] == row_map["b2"] + 1
-        # B's inserts must be after A's inserts
-        if "a3" in row_map and "b2" in row_map:
-            assert row_map["b2"] > row_map["a3"]
-
-    def test_single_insert_no_shift(self, mock_hook, context):
-        """Single insert — no other structural ops, so post_insert_updates
-        should not be recalculated (ranges stay as initially computed)."""
-        mock_hook.get_values.return_value = [
-            ["id"],
-            ["A"],      # row 2
-        ]
-
-        incoming = [
-            {"id": "A", "val": "a1"},
-            {"id": "A", "val": "a2"},
-            {"id": "A", "val": "a3"},
-        ]
-        op = self._make_op(incoming)
-        result = op.execute(context)
-
-        assert result["inserted"] == 2
-
-        # With only one insert op, post_insert_updates should use
-        # the original computed positions (rows 3, 4)
-        insert_ranges = []
-        for c in mock_hook.batch_update_values.call_args_list:
-            data = c[0][1]
-            for item in data:
-                for val_row in item["values"]:
-                    if val_row[1] in ("a2", "a3"):
-                        insert_ranges.append(item["range"])
-        assert len(insert_ranges) == 2
-        row_nums = sorted(int("".join(c for c in r.split(":")[-1] if c.isdigit()))
-                          for r in insert_ranges)
-        assert row_nums == [3, 4]
-
-    def test_insert_with_delete_below_no_shift(self, mock_hook, context):
-        """Delete below insert should not affect post_insert_updates of
-        the insert above it."""
-        # Existing: A at row 2, B at rows 3,4,5
-        mock_hook.get_values.return_value = [
-            ["id"],
-            ["A"],      # row 2
-            ["B"],      # row 3
-            ["B"],      # row 4
-            ["B"],      # row 5
-        ]
-
-        # A grows to 3 (insert 2), B shrinks to 1 (delete 2)
-        incoming = [
-            {"id": "A", "val": "a1"},
-            {"id": "A", "val": "a2"},
-            {"id": "A", "val": "a3"},
-            {"id": "B", "val": "b1"},
-        ]
-        op = self._make_op(incoming)
-        result = op.execute(context)
-
-        assert result["inserted"] == 2
-        assert result["deleted"] == 2
-
-        # A's inserts are above B's deletes — they should not be shifted
-        insert_ranges = []
-        for c in mock_hook.batch_update_values.call_args_list:
-            data = c[0][1]
-            for item in data:
-                for val_row in item["values"]:
-                    if val_row[1] in ("a2", "a3"):
-                        insert_ranges.append(item["range"])
-        assert len(insert_ranges) == 2
-        row_nums = sorted(int("".join(c for c in r.split(":")[-1] if c.isdigit()))
-                          for r in insert_ranges)
-        assert row_nums == [3, 4]
 
 
 # ==================================================================

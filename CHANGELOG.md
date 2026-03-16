@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.6.0
+
+- **Breaking:** `smart_merge` now uses a **replace-by-key** strategy. For each key value present in the incoming data, all existing rows with that key are deleted and all incoming rows are appended at the end. Keys absent from the incoming data are left untouched. This replaces the previous positional update/insert/delete logic which produced incorrect results when the key was not unique per row (e.g. grouping by multiple columns with a single date key)
+- Removed internal methods `_adjust_row_indices` and `_adjust_post_insert_indices` (no longer needed)
+- Stats returned by `smart_merge` now contain `deleted` and `appended` only (previously: `updated`, `inserted`, `deleted`, `appended`)
+
 ## v0.5.1
 
 - **Fixed:** `row_stop` / `row_skip` conditions incorrectly matched every row when the specified column did not exist in the sheet headers. Missing columns are now silently ignored — the condition is skipped, and all rows are returned as expected

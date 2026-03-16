@@ -294,157 +294,52 @@ class GoogleSheetsWriteOperator(BaseOperator):
             key_val = str(row[key_col_idx]) if key_col_idx < len(row) else ""
             incoming_groups[key_val].append(row)
 
-        # Step 4 — Build operations
-        # We need the sheet's numeric ID for insert/delete
+        # Step 4 — Build delete and append operations
+        # Strategy: for each key present in incoming data —
+        #   delete ALL existing rows with that key, then append the new rows.
+        # Keys present in the sheet but absent from incoming data are left untouched.
         sheet_id = self._get_sheet_id(hook)
-        num_cols = len(headers)
 
-        updates: list[dict] = []          # value update requests
-        structural: list[dict] = []       # insert/delete dimension requests
-        append_rows: list[list[Any]] = [] # rows to append at the end
+        delete_ops: list[dict] = []   # deleteDimension requests
+        append_rows: list[list[Any]] = []
 
-        # Collect all keys in stable order (existing first, then new)
-        all_keys = list(dict.fromkeys(
-            list(existing_index.keys()) + list(incoming_groups.keys())
-        ))
-
-        for key_val in all_keys:
+        for key_val, incoming_row_data in incoming_groups.items():
             existing_row_nums = existing_index.get(key_val, [])
-            incoming_row_data = incoming_groups.get(key_val, [])
-
-            if not incoming_row_data:
-                # Key exists in sheet but not in incoming data — leave as-is
-                # (smart merge only touches keys present in the incoming data)
-                continue
-
-            if not existing_row_nums:
-                # New key — append at the end
-                append_rows.extend(incoming_row_data)
-                continue
-
-            existing_count = len(existing_row_nums)
-            incoming_count = len(incoming_row_data)
-
-            # Update rows that exist in both
-            overlap = min(existing_count, incoming_count)
-            for j in range(overlap):
-                row_num = existing_row_nums[j]
-                range_str = f"{prefix}A{row_num}:{self._index_to_column_letter(num_cols - 1)}{row_num}"
-                updates.append({
-                    "row_num": row_num,
-                    "range": range_str,
-                    "values": [incoming_row_data[j]],
-                })
-
-            if incoming_count > existing_count:
-                # Need to insert extra rows after the last existing row
-                insert_after = existing_row_nums[-1]  # 1-based
-                extra = incoming_row_data[existing_count:]
-                structural.append({
-                    "row_num": insert_after,
-                    "type": "insert",
-                    "start_index": insert_after,      # 0-based for API
-                    "end_index": insert_after + len(extra),
-                    "values": extra,
-                    "num_cols": num_cols,
-                })
-            elif incoming_count < existing_count:
-                # Need to delete surplus rows — group into contiguous segments
-                rows_to_delete = existing_row_nums[incoming_count:]
-                for seg_start, seg_end in self._group_contiguous(rows_to_delete):
-                    structural.append({
+            if existing_row_nums:
+                for seg_start, seg_end in self._group_contiguous(existing_row_nums):
+                    delete_ops.append({
                         "row_num": seg_start,
-                        "type": "delete",
-                        "start_index": seg_start - 1,       # 0-based
-                        "end_index": seg_end,                # exclusive in API
+                        "start_index": seg_start - 1,  # 0-based
+                        "end_index": seg_end,           # exclusive
                     })
+            append_rows.extend(incoming_row_data)
 
-        # Step 5 — Sort structural operations bottom-up (descending row number)
-        structural.sort(key=lambda op: op["row_num"], reverse=True)
+        # Step 5 — Execute deletes bottom-up (descending row number avoids index shifts)
+        stats = {"deleted": 0, "appended": 0}
 
-        # Step 6 — Execute structural changes (insert/delete) via batchUpdate
-        stats = {"updated": 0, "inserted": 0, "deleted": 0, "appended": 0}
-
-        if structural:
-            batch_requests: list[dict] = []
-            post_insert_updates: list[dict] = []
-
-            for op in structural:
-                if op["type"] == "delete":
-                    batch_requests.append({
-                        "deleteDimension": {
-                            "range": {
-                                "sheetId": sheet_id,
-                                "dimension": "ROWS",
-                                "startIndex": op["start_index"],
-                                "endIndex": op["end_index"],
-                            }
+        if delete_ops:
+            delete_ops.sort(key=lambda op: op["row_num"], reverse=True)
+            batch_requests = [
+                {
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": op["start_index"],
+                            "endIndex": op["end_index"],
                         }
-                    })
-                    stats["deleted"] += op["end_index"] - op["start_index"]
+                    }
+                }
+                for op in delete_ops
+            ]
+            logger.info("Deleting rows for %d key groups", len(delete_ops))
+            self._batched_batch_update(hook, batch_requests)
+            stats["deleted"] = sum(op["end_index"] - op["start_index"] for op in delete_ops)
 
-                elif op["type"] == "insert":
-                    batch_requests.append({
-                        "insertDimension": {
-                            "range": {
-                                "sheetId": sheet_id,
-                                "dimension": "ROWS",
-                                "startIndex": op["start_index"],
-                                "endIndex": op["end_index"],
-                            },
-                            "inheritFromBefore": True,
-                        }
-                    })
-                    # Queue value writes for inserted rows
-                    for k, row_data in enumerate(op["values"]):
-                        row_num = op["start_index"] + 1 + k  # 1-based
-                        end_col = self._index_to_column_letter(op["num_cols"] - 1)
-                        post_insert_updates.append({
-                            "range": f"{prefix}A{row_num}:{end_col}{row_num}",
-                            "values": [row_data],
-                            "row_num": row_num,
-                            "_source_op": id(op),
-                        })
-                    stats["inserted"] += len(op["values"])
-
-            # Execute structural batch
-            if batch_requests:
-                logger.info("Executing %d structural operations", len(batch_requests))
-                self._batched_batch_update(hook, batch_requests)
-
-            # Recalculate post_insert_updates indices after structural shifts
-            if post_insert_updates and len(structural) > 1:
-                self._adjust_post_insert_indices(
-                    post_insert_updates, structural, prefix
-                )
-
-            # Write values into newly inserted rows (strip internal fields)
-            if post_insert_updates:
-                clean_data = [
-                    {"range": u["range"], "values": u["values"]}
-                    for u in post_insert_updates
-                ]
-                hook.batch_update_values(self.spreadsheet_id, clean_data)
-
-            # Recalculate row indices in value-updates after structural shifts
-            if updates:
-                self._adjust_row_indices(updates, structural, prefix, num_cols)
-
-        # Step 7 — Execute value updates in batches via batchUpdate
-        if updates:
-            logger.info("Updating %d existing rows", len(updates))
-            for i in range(0, len(updates), self.batch_size):
-                batch = updates[i : i + self.batch_size]
-                batch_data = [{"range": u["range"], "values": u["values"]} for u in batch]
-                hook.batch_update_values(self.spreadsheet_id, batch_data)
-                stats["updated"] += len(batch)
-                if i + self.batch_size < len(updates):
-                    time.sleep(self.pause_between_batches)
-
-        # Step 8 — Append new-key rows
+        # Step 6 — Append all incoming rows
         if append_rows:
             target = f"{prefix}A1"
-            logger.info("Appending %d new rows", len(append_rows))
+            logger.info("Appending %d rows", len(append_rows))
             for i in range(0, len(append_rows), self.batch_size):
                 batch = append_rows[i : i + self.batch_size]
                 hook.append_values(self.spreadsheet_id, target, batch)
@@ -499,78 +394,6 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 prev = r
         groups.append((start, prev))
         return groups
-
-    def _adjust_row_indices(
-        self,
-        updates: list[dict],
-        structural_ops: list[dict],
-        prefix: str,
-        num_cols: int,
-    ) -> None:
-        """Recalculate ``row_num`` in *updates* after structural ops executed bottom-up."""
-        for op in structural_ops:
-            if op["type"] == "insert":
-                inserted_at = op["start_index"]  # 0-based
-                count = op["end_index"] - op["start_index"]
-                for upd in updates:
-                    if upd["row_num"] - 1 >= inserted_at:
-                        upd["row_num"] += count
-            elif op["type"] == "delete":
-                deleted_from = op["start_index"]  # 0-based
-                deleted_to = op["end_index"]       # exclusive, 0-based
-                count = deleted_to - deleted_from
-                for upd in updates:
-                    if upd["row_num"] - 1 >= deleted_to:
-                        upd["row_num"] -= count
-
-        # Rebuild range strings from corrected row_num
-        end_col = self._index_to_column_letter(num_cols - 1)
-        for upd in updates:
-            rn = upd["row_num"]
-            upd["range"] = f"{prefix}A{rn}:{end_col}{rn}"
-
-    def _adjust_post_insert_indices(
-        self,
-        post_insert_updates: list[dict],
-        structural_ops: list[dict],
-        prefix: str,
-    ) -> None:
-        """Recalculate row indices in *post_insert_updates* after structural ops.
-
-        Structural ops are sorted bottom-up (descending row_num) and executed
-        in that order.  Each post_insert_update must only be adjusted by ops
-        that execute **after** its parent op — i.e., ops that appear later in
-        the bottom-up list (lower row_num).
-        """
-        # Build a mapping: source_op id → index in structural_ops list
-        op_index_map: dict[int, int] = {
-            id(op): idx for idx, op in enumerate(structural_ops)
-        }
-
-        for upd in post_insert_updates:
-            source_idx = op_index_map.get(upd.get("_source_op", -1), -1)
-            # Only apply ops that come after source_idx in the list
-            for later_idx in range(source_idx + 1, len(structural_ops)):
-                op = structural_ops[later_idx]
-                if op["type"] == "insert":
-                    inserted_at = op["start_index"]
-                    count = op["end_index"] - op["start_index"]
-                    if upd["row_num"] - 1 >= inserted_at:
-                        upd["row_num"] += count
-                elif op["type"] == "delete":
-                    deleted_to = op["end_index"]
-                    count = deleted_to - op["start_index"]
-                    if upd["row_num"] - 1 >= deleted_to:
-                        upd["row_num"] -= count
-
-        # Rebuild range strings from corrected row_num
-        for upd in post_insert_updates:
-            range_str = upd["range"]
-            colon_idx = range_str.index(":")
-            end_part = range_str[colon_idx + 1:]
-            end_col = "".join(c for c in end_part if c.isalpha())
-            rn = upd["row_num"]
-            upd["range"] = f"{prefix}A{rn}:{end_col}{rn}"
 
     @staticmethod
     def _column_letter_to_index(letter: str) -> int:
