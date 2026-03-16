@@ -86,8 +86,9 @@ class TestMatchesAny:
         assert matches_any(row, [{"column": "status", "op": "empty"}]) is True
 
     def test_empty_missing_column(self):
+        # Missing column is ignored — condition does not match
         row = {"other": "x"}
-        assert matches_any(row, [{"column": "status", "op": "empty"}]) is True
+        assert matches_any(row, [{"column": "status", "op": "empty"}]) is False
 
     def test_not_empty(self):
         row = {"status": "active"}
