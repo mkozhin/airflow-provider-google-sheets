@@ -32,7 +32,9 @@ def matches_any(row_dict: dict, conditions: list[dict]) -> bool:
     for cond in conditions:
         col = cond["column"]
         op = cond.get("op", "equals")
-        cell = str(row_dict.get(col, "")) if row_dict.get(col) is not None else ""
+        if col not in row_dict:
+            continue
+        cell = str(row_dict[col]) if row_dict[col] is not None else ""
         expected = str(cond.get("value", ""))
 
         if op == "equals" and cell == expected:

@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.5.1
+
+- **Fixed:** `row_stop` / `row_skip` conditions incorrectly matched every row when the specified column did not exist in the sheet headers. Missing columns are now silently ignored — the condition is skipped, and all rows are returned as expected
+
 ## v0.5.0
 
 - Added `GoogleSheetsListSheetsOperator` — returns a `list[str]` of sheet (tab) names from a spreadsheet, with optional filtering by `name_pattern` (regex include), `exclude_pattern` (regex exclude), and `index_range` (positional slice). Compatible with Airflow dynamic task mapping (`expand(sheet_name=op.output)`)
