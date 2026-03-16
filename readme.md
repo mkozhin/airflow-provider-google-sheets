@@ -226,6 +226,18 @@ merge = GoogleSheetsWriteOperator(
         {"date": "2024-01-03", "value": 200},  # append new
     ],
 )
+
+# Table starting at a non-default cell (e.g. C3)
+# Headers are written to C3 on first run; key column is resolved relative to C
+merge_offset = GoogleSheetsWriteOperator(
+    task_id="smart_merge_offset",
+    spreadsheet_id="your-spreadsheet-id",
+    sheet_name="Report",
+    write_mode="smart_merge",
+    merge_key="date",
+    table_start="C3",   # table header lives at C3
+    data=[{"date": "2024-01-01", "revenue": 110}],
+)
 ```
 
 **Parameters:**
@@ -242,11 +254,12 @@ merge = GoogleSheetsWriteOperator(
 | `data_xcom_task_id` | str | `None` | Pull data from this task's XCom |
 | `data_xcom_key` | str | `"return_value"` | XCom key |
 | `has_headers` | bool | `True` | Data contains headers |
-| `write_headers` | bool | `True` | Write header row (overwrite mode) |
+| `write_headers` | bool | `True` | Write header row. In `append`/`smart_merge` modes, headers are written automatically when the sheet is empty |
 | `schema` | dict | `None` | Schema for formatting values |
 | `batch_size` | int | `1000` | Rows per API request |
 | `pause_between_batches` | float | `1.0` | Seconds between batches |
 | `merge_key` | str | `None` | Key column for smart_merge |
+| `table_start` | str | `"A1"` | Top-left cell of the table (e.g. `"C3"`). Used by `append` and `smart_merge` to locate the header and resolve column positions. Defaults to `"A1"` |
 
 **Data input formats:**
 - `list[dict]` — headers auto-detected from keys

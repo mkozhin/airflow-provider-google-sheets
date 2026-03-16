@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.1
+
+- **Fixed:** `append` and `smart_merge` modes now write the header row when the target sheet is empty and `write_headers=True` (default). Previously, the first run on a blank sheet produced data without a header row
+- **Fixed:** `smart_merge` no longer inherits header row formatting when appending new rows. Replaced `append_values` with `insertDimension(inheritFromBefore=False)` + `batch_update_values` — new rows always receive clean (default) cell formatting regardless of how the header row is styled
+- **Fixed:** `smart_merge` on first run (empty sheet with `write_headers=True`) inserted data rows before the header instead of after. The `insert_start` position now correctly accounts for the header row that was just written
+- **Fixed:** `append` empty-sheet check now reads only the `table_start` cell instead of the entire row, so headers are correctly written even when adjacent cells in the same row contain unrelated data
+- Added `table_start` parameter to `GoogleSheetsWriteOperator` (default `"A1"`) — specifies the top-left cell of the table for `append` and `smart_merge` modes. When the sheet is empty, headers are written to this cell. In `smart_merge`, the key column is resolved relative to `table_start`, and key column reads begin from the specified row. Existing DAGs without `table_start` are unaffected
+
 ## v0.6.0
 
 - **Breaking:** `smart_merge` now uses a **replace-by-key** strategy. For each key value present in the incoming data, all existing rows with that key are deleted and all incoming rows are appended at the end. Keys absent from the incoming data are left untouched. This replaces the previous positional update/insert/delete logic which produced incorrect results when the key was not unique per row (e.g. grouping by multiple columns with a single date key)

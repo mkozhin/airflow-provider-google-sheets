@@ -184,6 +184,81 @@ class TestAppend:
         target = mock_hook.append_values.call_args[0][1]
         assert target.startswith("Log!")
 
+    def test_append_empty_sheet_writes_headers(self, mock_hook, context):
+        """Empty sheet + write_headers=True → header row written before data."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1, "b": 2}],
+            write_headers=True,
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_called_once()
+        call_args = mock_hook.update_values.call_args[0]
+        assert call_args[2] == [["a", "b"]]
+        assert "A1" in call_args[1]
+        mock_hook.append_values.assert_called_once()
+
+    def test_append_non_empty_sheet_no_headers(self, mock_hook, context):
+        """Non-empty sheet → headers not written, data appended normally."""
+        mock_hook.get_values.return_value = [["a", "b"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1, "b": 2}],
+            write_headers=True,
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_not_called()
+        mock_hook.append_values.assert_called_once()
+
+    def test_append_write_headers_false_empty_sheet(self, mock_hook, context):
+        """write_headers=False → no header even on empty sheet."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1}],
+            write_headers=False,
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_not_called()
+        mock_hook.append_values.assert_called_once()
+
+    def test_append_empty_start_cell_with_data_to_the_right(self, mock_hook, context):
+        """table_start='C3' is empty but D3 has data → header still written to C3."""
+        # get_values returns non-empty only if we read the whole row;
+        # with the fix (single cell check) it returns [] → header is written
+        mock_hook.get_values.return_value = []  # C3 cell is empty
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1, "b": 2}],
+            table_start="C3",
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # Header must be written to C3
+        mock_hook.update_values.assert_called_once()
+        args = mock_hook.update_values.call_args[0]
+        assert "C3" in args[1]
+
+        # The emptiness check must use a single-cell range (not C3:3)
+        check_range = mock_hook.get_values.call_args[0][1]
+        assert check_range.endswith("C3"), (
+            f"Expected single-cell check 'C3', got: {check_range!r}"
+        )
+
 
 class TestDataSources:
     def test_data_from_xcom(self, mock_hook, context):
@@ -300,7 +375,7 @@ class TestSmartMerge:
         assert result["deleted"] == 2
         assert result["appended"] == 2
         mock_hook.batch_update.assert_called()
-        mock_hook.append_values.assert_called()
+        mock_hook.batch_update_values.assert_called()
 
     def test_existing_key_different_row_count(self, mock_hook, context):
         """3 existing rows, 5 incoming → delete 3, append 5."""
@@ -329,8 +404,11 @@ class TestSmartMerge:
 
         assert result["deleted"] == 0
         assert result["appended"] == 1
-        mock_hook.batch_update.assert_not_called()
-        mock_hook.append_values.assert_called()
+        # No deleteDimension — but insertDimension still uses batch_update
+        all_batch_calls = mock_hook.batch_update.call_args_list
+        all_requests = [r for call in all_batch_calls for r in call[0][1]]
+        assert not any("deleteDimension" in r for r in all_requests)
+        mock_hook.batch_update_values.assert_called()
 
     def test_key_in_sheet_not_in_incoming_is_untouched(self, mock_hook, context):
         """Key only in sheet (not incoming) → left as-is."""
@@ -433,6 +511,95 @@ class TestSmartMerge:
 
         key_range = mock_hook.get_values.call_args[0][1]
         assert key_range.startswith("MySheet!")
+
+    def test_uses_insert_dimension_not_append_values(self, mock_hook, context):
+        """New rows use insertDimension + batch_update_values, never append_values."""
+        mock_hook.get_values.return_value = [["date"], ["2024-04-01"]]
+        incoming = [{"date": "2024-04-02", "val": "new"}]
+        op = self._make_op(incoming)
+        op.execute(context)
+
+        mock_hook.append_values.assert_not_called()
+        mock_hook.batch_update_values.assert_called()
+
+    def test_inherit_from_before_false(self, mock_hook, context):
+        """insertDimension must use inheritFromBefore=False to avoid header formatting."""
+        mock_hook.get_values.return_value = [["date"]]  # only header row
+        incoming = [{"date": "2024-04-01", "val": "x"}]
+        op = self._make_op(incoming)
+        op.execute(context)
+
+        all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
+        insert_requests = [r["insertDimension"] for r in all_requests if "insertDimension" in r]
+        assert insert_requests, "Expected at least one insertDimension request"
+        assert all(not r["inheritFromBefore"] for r in insert_requests)
+
+    def test_insert_position_after_remaining_rows(self, mock_hook, context):
+        """After deleting key rows, insert at the position of remaining rows."""
+        # Sheet: header (row 1) + 2024-04-01 x2 (rows 2,3) + 2024-04-02 x1 (row 4)
+        mock_hook.get_values.return_value = [
+            ["date"],
+            ["2024-04-01"],  # row 2 — will be deleted
+            ["2024-04-01"],  # row 3 — will be deleted
+            ["2024-04-02"],  # row 4 — stays
+        ]
+        incoming = [{"date": "2024-04-01", "val": "new"}]
+        op = self._make_op(incoming)
+        op.execute(context)
+
+        # After deleting 2 rows: 4 total - 2 deleted = 2 remaining (rows 1 and 4 stay)
+        # insert startIndex (0-based) = 2
+        all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
+        insert_reqs = [r["insertDimension"] for r in all_requests if "insertDimension" in r]
+        assert insert_reqs[0]["range"]["startIndex"] == 2
+
+    def test_empty_sheet_writes_headers(self, mock_hook, context):
+        """Empty sheet + write_headers=True → header written before data."""
+        mock_hook.get_values.return_value = []
+        incoming = [{"date": "2024-04-01", "val": "x"}]
+        op = self._make_op(incoming, write_headers=True)
+        op.execute(context)
+
+        # update_values must be called with headers in row 1
+        assert mock_hook.update_values.call_count >= 1
+        first_call_args = mock_hook.update_values.call_args_list[0][0]
+        assert first_call_args[2] == [["date", "val"]]
+        assert "A1" in first_call_args[1]
+
+        # insertDimension must insert AFTER header (startIndex=1, not 0)
+        all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
+        insert_reqs = [r["insertDimension"] for r in all_requests if "insertDimension" in r]
+        assert insert_reqs[0]["range"]["startIndex"] == 1  # after row 1 (header)
+
+    def test_empty_sheet_insert_position_with_table_start(self, mock_hook, context):
+        """Empty sheet + table_start='A3' → data inserted after row 3 (header), not before."""
+        mock_hook.get_values.return_value = []
+        incoming = [{"date": "2024-04-01", "val": "x"}]
+        op = self._make_op(incoming, write_headers=True, table_start="A3")
+        op.execute(context)
+
+        all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
+        insert_reqs = [r["insertDimension"] for r in all_requests if "insertDimension" in r]
+        assert insert_reqs[0]["range"]["startIndex"] == 3  # 0-based row 4 = after row 3 (header)
+
+    def test_empty_sheet_write_headers_false(self, mock_hook, context):
+        """write_headers=False → no header written even on empty sheet."""
+        mock_hook.get_values.return_value = []
+        incoming = [{"date": "2024-04-01", "val": "x"}]
+        op = self._make_op(incoming, write_headers=False)
+        op.execute(context)
+
+        mock_hook.update_values.assert_not_called()
+
+    def test_non_empty_sheet_does_not_write_headers(self, mock_hook, context):
+        """Non-empty sheet → headers not written again."""
+        mock_hook.get_values.return_value = [["date"], ["2024-04-01"]]
+        incoming = [{"date": "2024-04-01", "val": "x"}]
+        op = self._make_op(incoming, write_headers=True)
+        op.execute(context)
+
+        # update_values should NOT be called (no header write; only batch_update for delete + append_values)
+        mock_hook.update_values.assert_not_called()
 
 
 # ==================================================================
@@ -756,8 +923,8 @@ class TestDeterministicKeyOrder:
 
 
 class TestBatchUpdateValuesUsage:
-    def test_smart_merge_uses_batch_update_for_deletes(self, mock_hook, context):
-        """Deletes use batch_update (deleteDimension), not batch_update_values."""
+    def test_smart_merge_uses_batch_update_for_deletes_and_inserts(self, mock_hook, context):
+        """Deletes use batch_update (deleteDimension); inserts use insertDimension + batch_update_values."""
         mock_hook.get_values.return_value = [
             ["id"],
             ["A"],   # row 2
@@ -780,11 +947,14 @@ class TestBatchUpdateValuesUsage:
 
         assert result["deleted"] == 2
         assert result["appended"] == 2
+        # batch_update called for deleteDimension and insertDimension
         mock_hook.batch_update.assert_called()
-        mock_hook.batch_update_values.assert_not_called()
+        # batch_update_values called for writing values
+        mock_hook.batch_update_values.assert_called()
+        mock_hook.append_values.assert_not_called()
 
-    def test_append_respects_batch_size(self, mock_hook, context):
-        """Append rows should respect batch_size."""
+    def test_insert_respects_batch_size(self, mock_hook, context):
+        """Inserted rows should respect batch_size via batch_update_values."""
         mock_hook.get_values.return_value = [["id"]]  # empty sheet
 
         incoming = [{"id": str(i), "val": str(i)} for i in range(5)]
@@ -800,8 +970,8 @@ class TestBatchUpdateValuesUsage:
         result = op.execute(context)
 
         assert result["appended"] == 5
-        # 5 rows / batch_size=2 → 3 append_values calls
-        assert mock_hook.append_values.call_count == 3
+        # 5 rows / batch_size=2 → 3 batch_update_values calls
+        assert mock_hook.batch_update_values.call_count == 3
 
 
 # ==================================================================
@@ -960,3 +1130,218 @@ class TestBatchUpdatePayloadCleanliness:
         op = self._make_op(incoming)
         op.execute(context)
         self._assert_clean_payloads(mock_hook)
+
+
+# ==================================================================
+# table_start parameter
+# ==================================================================
+
+
+class TestTableStart:
+    """Tests for the table_start parameter in append and smart_merge modes."""
+
+    # ---- append ----
+
+    def test_append_table_start_default_stored(self, mock_hook, context):
+        """table_start defaults to 'A1'."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1}],
+        )
+        assert op.table_start == "A1"
+
+    def test_append_table_start_empty_sheet_header_at_start_cell(self, mock_hook, context):
+        """Empty sheet + table_start='C3' → header written to C3."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"x": 1, "y": 2}],
+            table_start="C3",
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # Header written to C3
+        mock_hook.update_values.assert_called_once()
+        args = mock_hook.update_values.call_args[0]
+        assert "C3" in args[1]
+        assert args[2] == [["x", "y"]]
+
+        # Append target starts from C3
+        append_target = mock_hook.append_values.call_args[0][1]
+        assert "C3" in append_target
+
+    def test_append_table_start_empty_row_check_uses_start_row(self, mock_hook, context):
+        """Empty check reads from table_start row, not row 1."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1}],
+            table_start="B5",
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # get_values called to check emptiness at row 5 (not row 1)
+        check_range = mock_hook.get_values.call_args[0][1]
+        assert "5" in check_range
+        assert "B" in check_range
+
+    def test_append_table_start_non_empty_no_header(self, mock_hook, context):
+        """Non-empty sheet at table_start row → header not written."""
+        mock_hook.get_values.return_value = [["a", "b"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1, "b": 2}],
+            table_start="C3",
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_not_called()
+
+    def test_append_table_start_default_behavior_unchanged(self, mock_hook, context):
+        """table_start='A1' (default) behaves identical to before."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1}],
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        args = mock_hook.update_values.call_args[0]
+        assert "A1" in args[1]
+
+    # ---- smart_merge ----
+
+    def test_smart_merge_table_start_key_column_offset(self, mock_hook, context):
+        """table_start='C1': key is first col → absolute key col is C."""
+        mock_hook.get_values.return_value = [["date"], ["2024-01-01"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="date",
+            data=[{"date": "2024-01-01", "val": "x"}],
+            table_start="C1",
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        key_range = mock_hook.get_values.call_args[0][1]
+        # C is the start col; key_col_idx=0 → absolute = C
+        assert key_range.startswith("C")
+
+    def test_smart_merge_table_start_key_column_second(self, mock_hook, context):
+        """table_start='C3': key is second column (idx=1) → absolute key col is D."""
+        mock_hook.get_values.return_value = [["name", "date"], ["Alice", "2024-01-01"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="date",
+            data=[{"name": "Alice", "date": "2024-01-01"}],
+            table_start="C3",
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        key_range = mock_hook.get_values.call_args[0][1]
+        # C(idx=2) + key_col_idx(1) = D(idx=3)
+        assert "D" in key_range
+        assert "3" in key_range  # starts from row 3
+
+    def test_smart_merge_table_start_row_numbering(self, mock_hook, context):
+        """table_start='A3': row 3 is header, data indexed from row 4."""
+        mock_hook.get_values.return_value = [
+            ["date"],        # row 3 — header
+            ["2024-01-01"],  # row 4 — data
+        ]
+        incoming = [{"date": "2024-01-01", "val": "x"}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="date",
+            data=incoming,
+            table_start="A3",
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 1
+        # Deletion should target row 4 (0-based index 3)
+        all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
+        delete_ranges = [r["deleteDimension"]["range"] for r in all_requests if "deleteDimension" in r]
+        assert delete_ranges[0]["startIndex"] == 3   # 0-based row 4
+
+    def test_smart_merge_table_start_empty_sheet_header_at_start_cell(self, mock_hook, context):
+        """Empty sheet + table_start='C3' → header written to C3."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="date",
+            data=[{"date": "2024-01-01", "val": "x"}],
+            table_start="C3",
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_called_once()
+        args = mock_hook.update_values.call_args[0]
+        assert "C3" in args[1]
+        assert args[2] == [["date", "val"]]
+
+    def test_smart_merge_table_start_insert_position(self, mock_hook, context):
+        """Inserted rows use table_start column in range, not hardcoded A."""
+        mock_hook.get_values.return_value = [["date"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="date",
+            data=[{"date": "2024-01-02", "val": "new"}],
+            table_start="B2",
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # batch_update_values range should start with B (table_start col)
+        bwv_call = mock_hook.batch_update_values.call_args[0][1]
+        assert any("B" in item["range"] for item in bwv_call)
+
+    def test_smart_merge_table_start_default_behavior_unchanged(self, mock_hook, context):
+        """table_start='A1' (default) — behavior same as before."""
+        mock_hook.get_values.return_value = [["date"], ["2024-01-01"]]
+        incoming = [{"date": "2024-01-01", "val": "x"}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="smart_merge",
+            merge_key="date",
+            data=incoming,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 1
+        assert result["appended"] == 1

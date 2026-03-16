@@ -44,12 +44,16 @@ class GoogleSheetsWriteOperator(BaseOperator):
         batch_size: Rows per API request.
         pause_between_batches: Seconds to wait between batches.
         merge_key: Column name used as the key for *smart_merge*.
+        table_start: Top-left cell of the table (e.g. ``"A1"``, ``"C3"``).
+            Used by *append* and *smart_merge* to locate the header row and
+            compute absolute column positions.  Defaults to ``"A1"``.
     """
 
     template_fields: Sequence[str] = (
         "spreadsheet_id",
         "sheet_name",
         "cell_range",
+        "table_start",
         "data",
         "data_xcom_task_id",
         "clear_mode",
@@ -73,6 +77,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         batch_size: int = 1000,
         pause_between_batches: float = 1.0,
         merge_key: str | None = None,
+        table_start: str = "A1",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -91,6 +96,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.batch_size = batch_size
         self.pause_between_batches = pause_between_batches
         self.merge_key = merge_key
+        self.table_start = table_start
 
     # ------------------------------------------------------------------
     # helpers
@@ -229,9 +235,20 @@ class GoogleSheetsWriteOperator(BaseOperator):
         rows: list[list[Any]],
     ) -> dict[str, Any]:
         prefix = self._sheet_prefix()
-        target = self.cell_range or f"{prefix}A1"
+        start_col, start_row = self._parse_range_start(self.table_start)
+        target = self.cell_range or f"{prefix}{start_col}{start_row}"
         if not target.startswith(prefix) and prefix:
             target = f"{prefix}{target}"
+
+        # Write headers if the sheet is empty and write_headers is requested
+        if self.write_headers and headers:
+            first_row = hook.get_values(
+                self.spreadsheet_id, f"{prefix}{start_col}{start_row}"
+            )
+            if not first_row:
+                header_range = f"{prefix}{start_col}{start_row}"
+                logger.info("Sheet is empty — writing headers to %s", header_range)
+                hook.update_values(self.spreadsheet_id, header_range, [headers])
 
         total_written = 0
         for i in range(0, len(rows), self.batch_size):
@@ -267,22 +284,32 @@ class GoogleSheetsWriteOperator(BaseOperator):
         key_col_idx = headers.index(self.merge_key)
         prefix = self._sheet_prefix()
 
-        # Step 1 — Determine the key column letter
-        key_col_letter = self._index_to_column_letter(key_col_idx)
+        # Step 1 — Resolve table start position
+        table_start_col, table_start_row = self._parse_range_start(self.table_start)
+        start_col_idx = self._column_letter_to_index(table_start_col)
 
-        # Step 2 — Read the entire key column from the sheet
-        key_range = f"{prefix}{key_col_letter}:{key_col_letter}"
+        # Step 2 — Determine the absolute key column letter and read from start row
+        abs_key_col = self._index_to_column_letter(start_col_idx + key_col_idx)
+        key_range = f"{prefix}{abs_key_col}{table_start_row}:{abs_key_col}"
         logger.info("Reading key column from %s", key_range)
         existing_keys_raw = hook.get_values(self.spreadsheet_id, key_range)
 
-        # Build index: {key_value: [row_numbers]} (1-based)
+        # Write headers if the sheet is completely empty
+        headers_just_written = False
+        if not existing_keys_raw and self.write_headers and headers:
+            header_range = f"{prefix}{table_start_col}{table_start_row}"
+            logger.info("Sheet is empty — writing headers to %s", header_range)
+            hook.update_values(self.spreadsheet_id, header_range, [headers])
+            headers_just_written = True
+
+        # Build index: {key_value: [row_numbers]} (1-based absolute)
         existing_index: dict[str, list[int]] = defaultdict(list)
         if self.has_headers:
             data_rows = existing_keys_raw[1:]
-            start_row_num = 2
+            start_row_num = table_start_row + 1
         else:
             data_rows = existing_keys_raw
-            start_row_num = 1
+            start_row_num = table_start_row
         for row_num, row in enumerate(data_rows, start=start_row_num):
             if row:
                 key_val = str(row[0])
@@ -316,6 +343,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
 
         # Step 5 — Execute deletes bottom-up (descending row number avoids index shifts)
         stats = {"deleted": 0, "appended": 0}
+        total_deleted = 0
 
         if delete_ops:
             delete_ops.sort(key=lambda op: op["row_num"], reverse=True)
@@ -334,15 +362,45 @@ class GoogleSheetsWriteOperator(BaseOperator):
             ]
             logger.info("Deleting rows for %d key groups", len(delete_ops))
             self._batched_batch_update(hook, batch_requests)
-            stats["deleted"] = sum(op["end_index"] - op["start_index"] for op in delete_ops)
+            total_deleted = sum(op["end_index"] - op["start_index"] for op in delete_ops)
+            stats["deleted"] = total_deleted
 
-        # Step 6 — Append all incoming rows
+        # Step 6 — Insert incoming rows with clean formatting (inheritFromBefore=False)
         if append_rows:
-            target = f"{prefix}A1"
-            logger.info("Appending %d rows", len(append_rows))
+            total_existing = len(existing_keys_raw) + (1 if headers_just_written else 0)
+            rows_after_deletion = total_existing - total_deleted
+            # 0-based absolute insert position
+            insert_start = (table_start_row - 1) + rows_after_deletion
+            insert_end = insert_start + len(append_rows)
+
+            logger.info("Inserting %d rows at index %d", len(append_rows), insert_start)
+            self._batched_batch_update(hook, [
+                {
+                    "insertDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": insert_start,
+                            "endIndex": insert_end,
+                        },
+                        "inheritFromBefore": False,
+                    }
+                }
+            ])
+
+            # Compute end column letter for the value ranges
+            end_col = self._index_to_column_letter(start_col_idx + len(headers) - 1)
+
             for i in range(0, len(append_rows), self.batch_size):
                 batch = append_rows[i : i + self.batch_size]
-                hook.append_values(self.spreadsheet_id, target, batch)
+                value_data = []
+                for j, row in enumerate(batch):
+                    row_num = table_start_row + rows_after_deletion + i + j
+                    value_data.append({
+                        "range": f"{prefix}{table_start_col}{row_num}:{end_col}{row_num}",
+                        "values": [row],
+                    })
+                hook.batch_update_values(self.spreadsheet_id, value_data)
                 stats["appended"] += len(batch)
                 if i + self.batch_size < len(append_rows):
                     time.sleep(self.pause_between_batches)

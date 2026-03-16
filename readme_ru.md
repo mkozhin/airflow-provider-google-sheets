@@ -207,6 +207,18 @@ merge = GoogleSheetsWriteOperator(
         {"date": "2024-01-03", "value": 200},  # добавление новой
     ],
 )
+
+# Таблица начинается не с A1 (например, с C3)
+# При первом запуске заголовок записывается в C3; ключевая колонка отсчитывается от C
+merge_offset = GoogleSheetsWriteOperator(
+    task_id="smart_merge_offset",
+    spreadsheet_id="your-spreadsheet-id",
+    sheet_name="Отчёт",
+    write_mode="smart_merge",
+    merge_key="date",
+    table_start="C3",   # заголовок таблицы находится в ячейке C3
+    data=[{"date": "2024-01-01", "revenue": 110}],
+)
 ```
 
 **Параметры:**
@@ -223,11 +235,12 @@ merge = GoogleSheetsWriteOperator(
 | `data_xcom_task_id` | str | `None` | Получить данные из XCom этого таска |
 | `data_xcom_key` | str | `"return_value"` | Ключ XCom |
 | `has_headers` | bool | `True` | Данные содержат заголовки |
-| `write_headers` | bool | `True` | Записывать строку заголовков (режим перезаписи) |
+| `write_headers` | bool | `True` | Записывать строку заголовков. В режимах `append`/`smart_merge` заголовки записываются автоматически при пустом листе |
 | `schema` | dict | `None` | Схема для форматирования значений |
 | `batch_size` | int | `1000` | Строк за один API-запрос |
 | `pause_between_batches` | float | `1.0` | Пауза между батчами (секунды) |
 | `merge_key` | str | `None` | Ключевой столбец для smart_merge |
+| `table_start` | str | `"A1"` | Верхний левый угол таблицы (например, `"C3"`). Используется в `append` и `smart_merge` для определения строки заголовка и абсолютных позиций колонок. По умолчанию `"A1"` |
 
 **Форматы входных данных:**
 - `list[dict]` — заголовки определяются автоматически из ключей
