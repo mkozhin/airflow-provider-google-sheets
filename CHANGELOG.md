@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.6.2
+
+- **Fixed:** `smart_merge` raised `HttpError 400: insertDimension: range.startIndex must be less than the grid size` on every run. Root cause: `insertDimension(inheritFromBefore=False)` is invalid when `startIndex >= gridSize` (API requires a row below the insertion point). Replaced with `appendDimension` which is designed for end-of-sheet insertion and always produces clean (default) cell formatting
+
 ## v0.6.1
 
 - **Fixed:** `append` and `smart_merge` modes now write the header row when the target sheet is empty and `write_headers=True` (default). Previously, the first run on a blank sheet produced data without a header row

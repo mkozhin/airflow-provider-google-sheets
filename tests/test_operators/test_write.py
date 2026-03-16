@@ -404,7 +404,7 @@ class TestSmartMerge:
 
         assert result["deleted"] == 0
         assert result["appended"] == 1
-        # No deleteDimension — but insertDimension still uses batch_update
+        # No deleteDimension — but appendDimension still uses batch_update
         all_batch_calls = mock_hook.batch_update.call_args_list
         all_requests = [r for call in all_batch_calls for r in call[0][1]]
         assert not any("deleteDimension" in r for r in all_requests)
@@ -512,8 +512,8 @@ class TestSmartMerge:
         key_range = mock_hook.get_values.call_args[0][1]
         assert key_range.startswith("MySheet!")
 
-    def test_uses_insert_dimension_not_append_values(self, mock_hook, context):
-        """New rows use insertDimension + batch_update_values, never append_values."""
+    def test_uses_append_dimension_and_batch_update_values_not_append_values(self, mock_hook, context):
+        """New rows use appendDimension + batch_update_values, never append_values."""
         mock_hook.get_values.return_value = [["date"], ["2024-04-01"]]
         incoming = [{"date": "2024-04-02", "val": "new"}]
         op = self._make_op(incoming)
@@ -522,20 +522,23 @@ class TestSmartMerge:
         mock_hook.append_values.assert_not_called()
         mock_hook.batch_update_values.assert_called()
 
-    def test_inherit_from_before_false(self, mock_hook, context):
-        """insertDimension must use inheritFromBefore=False to avoid header formatting."""
+    def test_uses_append_dimension_not_insert_dimension(self, mock_hook, context):
+        """New rows use appendDimension (not insertDimension) to get clean formatting."""
         mock_hook.get_values.return_value = [["date"]]  # only header row
         incoming = [{"date": "2024-04-01", "val": "x"}]
         op = self._make_op(incoming)
         op.execute(context)
 
         all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
-        insert_requests = [r["insertDimension"] for r in all_requests if "insertDimension" in r]
-        assert insert_requests, "Expected at least one insertDimension request"
-        assert all(not r["inheritFromBefore"] for r in insert_requests)
+        append_requests = [r["appendDimension"] for r in all_requests if "appendDimension" in r]
+        assert append_requests, "Expected at least one appendDimension request"
+        assert all(r["dimension"] == "ROWS" for r in append_requests)
+        # insertDimension must NOT be used
+        insert_requests = [r for r in all_requests if "insertDimension" in r]
+        assert not insert_requests, "insertDimension must not be used"
 
     def test_insert_position_after_remaining_rows(self, mock_hook, context):
-        """After deleting key rows, insert at the position of remaining rows."""
+        """After deleting key rows, appendDimension adds 1 row (length=1)."""
         # Sheet: header (row 1) + 2024-04-01 x2 (rows 2,3) + 2024-04-02 x1 (row 4)
         mock_hook.get_values.return_value = [
             ["date"],
@@ -547,11 +550,10 @@ class TestSmartMerge:
         op = self._make_op(incoming)
         op.execute(context)
 
-        # After deleting 2 rows: 4 total - 2 deleted = 2 remaining (rows 1 and 4 stay)
-        # insert startIndex (0-based) = 2
         all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
-        insert_reqs = [r["insertDimension"] for r in all_requests if "insertDimension" in r]
-        assert insert_reqs[0]["range"]["startIndex"] == 2
+        append_reqs = [r["appendDimension"] for r in all_requests if "appendDimension" in r]
+        assert append_reqs, "Expected appendDimension request"
+        assert append_reqs[0]["length"] == 1
 
     def test_empty_sheet_writes_headers(self, mock_hook, context):
         """Empty sheet + write_headers=True → header written before data."""
@@ -566,21 +568,23 @@ class TestSmartMerge:
         assert first_call_args[2] == [["date", "val"]]
         assert "A1" in first_call_args[1]
 
-        # insertDimension must insert AFTER header (startIndex=1, not 0)
+        # appendDimension must add 1 row (data goes after header)
         all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
-        insert_reqs = [r["insertDimension"] for r in all_requests if "insertDimension" in r]
-        assert insert_reqs[0]["range"]["startIndex"] == 1  # after row 1 (header)
+        append_reqs = [r["appendDimension"] for r in all_requests if "appendDimension" in r]
+        assert append_reqs, "Expected appendDimension request"
+        assert append_reqs[0]["length"] == 1
 
     def test_empty_sheet_insert_position_with_table_start(self, mock_hook, context):
-        """Empty sheet + table_start='A3' → data inserted after row 3 (header), not before."""
+        """Empty sheet + table_start='A3' → appendDimension adds 1 row for data."""
         mock_hook.get_values.return_value = []
         incoming = [{"date": "2024-04-01", "val": "x"}]
         op = self._make_op(incoming, write_headers=True, table_start="A3")
         op.execute(context)
 
         all_requests = [r for call in mock_hook.batch_update.call_args_list for r in call[0][1]]
-        insert_reqs = [r["insertDimension"] for r in all_requests if "insertDimension" in r]
-        assert insert_reqs[0]["range"]["startIndex"] == 3  # 0-based row 4 = after row 3 (header)
+        append_reqs = [r["appendDimension"] for r in all_requests if "appendDimension" in r]
+        assert append_reqs, "Expected appendDimension request"
+        assert append_reqs[0]["length"] == 1
 
     def test_empty_sheet_write_headers_false(self, mock_hook, context):
         """write_headers=False → no header written even on empty sheet."""
@@ -947,7 +951,7 @@ class TestBatchUpdateValuesUsage:
 
         assert result["deleted"] == 2
         assert result["appended"] == 2
-        # batch_update called for deleteDimension and insertDimension
+        # batch_update called for deleteDimension and appendDimension
         mock_hook.batch_update.assert_called()
         # batch_update_values called for writing values
         mock_hook.batch_update_values.assert_called()

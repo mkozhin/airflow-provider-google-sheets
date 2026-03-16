@@ -365,25 +365,20 @@ class GoogleSheetsWriteOperator(BaseOperator):
             total_deleted = sum(op["end_index"] - op["start_index"] for op in delete_ops)
             stats["deleted"] = total_deleted
 
-        # Step 6 — Insert incoming rows with clean formatting (inheritFromBefore=False)
+        # Step 6 — Append incoming rows with clean (default) formatting
         if append_rows:
             total_existing = len(existing_keys_raw) + (1 if headers_just_written else 0)
             rows_after_deletion = total_existing - total_deleted
-            # 0-based absolute insert position
+            # 0-based absolute row position (used for value range addresses below)
             insert_start = (table_start_row - 1) + rows_after_deletion
-            insert_end = insert_start + len(append_rows)
 
-            logger.info("Inserting %d rows at index %d", len(append_rows), insert_start)
+            logger.info("Appending %d rows via appendDimension", len(append_rows))
             self._batched_batch_update(hook, [
                 {
-                    "insertDimension": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "dimension": "ROWS",
-                            "startIndex": insert_start,
-                            "endIndex": insert_end,
-                        },
-                        "inheritFromBefore": False,
+                    "appendDimension": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "length": len(append_rows),
                     }
                 }
             ])
