@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.7.0
+
+- **Fixed:** `merge` mode no longer inherits header row formatting on newly appended rows. Replaced `appendDimension` + `batch_update_values` with `values.append` (creates rows and writes data in one API call) followed by a `repeatCell` request that explicitly clears `userEnteredFormat` on only the written columns
+- **Renamed:** `write_mode="smart_merge"` → `write_mode="merge"`. The old name `"smart_merge"` remains accepted as a silent alias with no deprecation warning or breaking change. Internal method renamed `_execute_smart_merge` → `_execute_merge`
+
 ## v0.6.2
 
 - **Fixed:** `smart_merge` raised `HttpError 400: insertDimension: range.startIndex must be less than the grid size` on every run. Root cause: `insertDimension(inheritFromBefore=False)` is invalid when `startIndex >= gridSize` (API requires a row below the insertion point). Replaced with `appendDimension` which is designed for end-of-sheet insertion and always produces clean (default) cell formatting

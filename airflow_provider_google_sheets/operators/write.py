@@ -23,14 +23,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
 
     * ``overwrite`` — clear the target range and write new data.
     * ``append`` — append rows after the last occupied row.
-    * ``smart_merge`` — update / insert / delete rows based on a key column.
+    * ``merge`` — update / insert / delete rows based on a key column.
+      ``smart_merge`` is accepted as a silent alias.
 
     Args:
         gcp_conn_id: Airflow Connection ID.
         spreadsheet_id: Target spreadsheet ID.
         sheet_name: Target sheet (tab) name.
         cell_range: Target A1 range (used by *overwrite*).
-        write_mode: ``"overwrite"``, ``"append"`` or ``"smart_merge"``.
+        write_mode: ``"overwrite"``, ``"append"`` or ``"merge"`` (alias: ``"smart_merge"``).
         data: Inline data — ``list[list]``, ``list[dict]``, or a file path.
         data_xcom_task_id: Pull data from this task's XCom instead.
         data_xcom_key: XCom key when using *data_xcom_task_id*.
@@ -43,9 +44,9 @@ class GoogleSheetsWriteOperator(BaseOperator):
             neighbouring columns and extra rows untouched.
         batch_size: Rows per API request.
         pause_between_batches: Seconds to wait between batches.
-        merge_key: Column name used as the key for *smart_merge*.
+        merge_key: Column name used as the key for *merge*.
         table_start: Top-left cell of the table (e.g. ``"A1"``, ``"C3"``).
-            Used by *append* and *smart_merge* to locate the header row and
+            Used by *append* and *merge* to locate the header row and
             compute absolute column positions.  Defaults to ``"A1"``.
     """
 
@@ -134,8 +135,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
             return self._execute_overwrite(hook, headers, rows)
         if self.write_mode == "append":
             return self._execute_append(hook, headers, rows)
-        if self.write_mode == "smart_merge":
-            return self._execute_smart_merge(hook, headers, rows)
+        if self.write_mode in ("merge", "smart_merge"):
+            return self._execute_merge(hook, headers, rows)
 
         raise ValueError(f"Unknown write_mode: '{self.write_mode}'")
 
@@ -266,16 +267,16 @@ class GoogleSheetsWriteOperator(BaseOperator):
     # smart merge
     # ------------------------------------------------------------------
 
-    def _execute_smart_merge(
+    def _execute_merge(
         self,
         hook: GoogleSheetsHook,
         headers: list[str] | None,
         rows: list[list[Any]],
     ) -> dict[str, Any]:
         if not self.merge_key:
-            raise ValueError("merge_key is required for smart_merge mode")
+            raise ValueError("merge_key is required for merge mode")
         if not headers:
-            raise ValueError("Headers are required for smart_merge mode")
+            raise ValueError("Headers are required for merge mode")
         if self.merge_key not in headers:
             raise ValueError(
                 f"merge_key '{self.merge_key}' not found in headers: {headers}"
@@ -369,39 +370,40 @@ class GoogleSheetsWriteOperator(BaseOperator):
         if append_rows:
             total_existing = len(existing_keys_raw) + (1 if headers_just_written else 0)
             rows_after_deletion = total_existing - total_deleted
-            # 0-based absolute row position (used for value range addresses below)
+            # 0-based absolute row position where new rows will land (for repeatCell)
             insert_start = (table_start_row - 1) + rows_after_deletion
 
-            logger.info("Appending %d rows via appendDimension", len(append_rows))
-            self._batched_batch_update(hook, [
-                {
-                    "appendDimension": {
-                        "sheetId": sheet_id,
-                        "dimension": "ROWS",
-                        "length": len(append_rows),
-                    }
-                }
-            ])
-
-            # Compute end column letter for the value ranges
+            # Compute range hint for values.append
             end_col = self._index_to_column_letter(start_col_idx + len(headers) - 1)
+            append_range = f"{prefix}{table_start_col}{table_start_row}:{end_col}"
 
+            logger.info("Appending %d rows via values.append", len(append_rows))
             for i in range(0, len(append_rows), self.batch_size):
                 batch = append_rows[i : i + self.batch_size]
-                value_data = []
-                for j, row in enumerate(batch):
-                    row_num = table_start_row + rows_after_deletion + i + j
-                    value_data.append({
-                        "range": f"{prefix}{table_start_col}{row_num}:{end_col}{row_num}",
-                        "values": [row],
-                    })
-                hook.batch_update_values(self.spreadsheet_id, value_data)
+                hook.append_values(self.spreadsheet_id, append_range, batch)
                 stats["appended"] += len(batch)
                 if i + self.batch_size < len(append_rows):
                     time.sleep(self.pause_between_batches)
 
-        logger.info("Smart merge complete: %s", stats)
-        return {"mode": "smart_merge", **stats}
+            # Clear inherited formatting from the new rows
+            self._batched_batch_update(hook, [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": insert_start,
+                            "endRowIndex": insert_start + len(append_rows),
+                            "startColumnIndex": start_col_idx,
+                            "endColumnIndex": start_col_idx + len(headers),
+                        },
+                        "cell": {"userEnteredFormat": {}},
+                        "fields": "userEnteredFormat",
+                    }
+                }
+            ])
+
+        logger.info("Merge complete: %s", stats)
+        return {"mode": "merge", **stats}
 
     # ------------------------------------------------------------------
     # internal utilities

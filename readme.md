@@ -11,8 +11,8 @@ Apache Airflow provider for Google Sheets API v4. Read, write, and manage Google
 ## Features
 
 - **Read** data from Google Sheets with chunked streaming, schema-based type conversion, and CSV/JSON/JSONL/XCom output
-- **Write** data in three modes: overwrite, append, and smart merge (upsert by key)
-- **Smart merge** — update, insert, and delete rows based on a key column with correct index recalculation
+- **Write** data in three modes: overwrite, append, and merge (upsert by key)
+- **Merge** — update, insert, and delete rows based on a key column with correct index recalculation
 - **Manage** spreadsheets — create new spreadsheets, sheets, and list sheets with filtering
 - **Large datasets** — streaming read/write without loading everything into memory
 - **Schema support** — automatic type conversion (date, int, float, bool) on read and write
@@ -215,11 +215,11 @@ append = GoogleSheetsWriteOperator(
     data=[{"event": "login", "user": "alice"}],
 )
 
-# Smart merge by key
+# Merge by key
 merge = GoogleSheetsWriteOperator(
-    task_id="smart_merge",
+    task_id="merge",
     spreadsheet_id="your-spreadsheet-id",
-    write_mode="smart_merge",
+    write_mode="merge",  # "smart_merge" is accepted as an alias
     merge_key="date",
     data=[
         {"date": "2024-01-01", "value": 110},  # update existing
@@ -230,10 +230,10 @@ merge = GoogleSheetsWriteOperator(
 # Table starting at a non-default cell (e.g. C3)
 # Headers are written to C3 on first run; key column is resolved relative to C
 merge_offset = GoogleSheetsWriteOperator(
-    task_id="smart_merge_offset",
+    task_id="merge_offset",
     spreadsheet_id="your-spreadsheet-id",
     sheet_name="Report",
-    write_mode="smart_merge",
+    write_mode="merge",
     merge_key="date",
     table_start="C3",   # table header lives at C3
     data=[{"date": "2024-01-01", "revenue": 110}],
@@ -248,18 +248,18 @@ merge_offset = GoogleSheetsWriteOperator(
 | `spreadsheet_id` | str | — | Spreadsheet ID |
 | `sheet_name` | str | `None` | Sheet name |
 | `cell_range` | str | `None` | Target A1 range (overwrite mode) |
-| `write_mode` | str | `"overwrite"` | `"overwrite"`, `"append"`, `"smart_merge"` |
+| `write_mode` | str | `"overwrite"` | `"overwrite"`, `"append"`, `"merge"` (alias: `"smart_merge"`) |
 | `clear_mode` | str | `"sheet"` | Overwrite clearing strategy: `"sheet"` clears entire sheet and trims extra rows; `"range"` clears only data columns |
 | `data` | Any | `None` | Data: list[list], list[dict], or file path |
 | `data_xcom_task_id` | str | `None` | Pull data from this task's XCom |
 | `data_xcom_key` | str | `"return_value"` | XCom key |
 | `has_headers` | bool | `True` | Data contains headers |
-| `write_headers` | bool | `True` | Write header row. In `append`/`smart_merge` modes, headers are written automatically when the sheet is empty |
+| `write_headers` | bool | `True` | Write header row. In `append`/`merge` modes, headers are written automatically when the sheet is empty |
 | `schema` | dict | `None` | Schema for formatting values |
 | `batch_size` | int | `1000` | Rows per API request |
 | `pause_between_batches` | float | `1.0` | Seconds between batches |
-| `merge_key` | str | `None` | Key column for smart_merge |
-| `table_start` | str | `"A1"` | Top-left cell of the table (e.g. `"C3"`). Used by `append` and `smart_merge` to locate the header and resolve column positions. Defaults to `"A1"` |
+| `merge_key` | str | `None` | Key column for merge mode |
+| `table_start` | str | `"A1"` | Top-left cell of the table (e.g. `"C3"`). Used by `append` and `merge` to locate the header and resolve column positions. Defaults to `"A1"` |
 
 **Data input formats:**
 - `list[dict]` — headers auto-detected from keys
@@ -270,15 +270,14 @@ merge_offset = GoogleSheetsWriteOperator(
 File format is auto-detected by extension: `.csv` → CSV, everything else → JSONL.
 To read a JSON array file, pass `source_type="json"` to `normalize_input_data()` or write data as JSONL instead.
 
-### Smart Merge Algorithm
+### Merge Algorithm
 
-Smart merge reads the key column from the sheet, compares with incoming data, and generates minimal operations:
+Merge reads the key column from the sheet, compares with incoming data, and generates minimal operations:
 
 1. **Read** the key column to build an index `{key_value: [row_numbers]}`
-2. **Compare** each key: same count → update, more incoming → insert, fewer → delete, new key → append
-3. **Sort** structural operations bottom-up (descending row number) to prevent index corruption
-4. **Execute** inserts/deletes via `batchUpdate`, then recalculate row indices for value updates
-5. **Write** values via `batch_update_values` for efficiency
+2. **Delete** all existing rows for each key present in incoming data (bottom-up to avoid index shifts)
+3. **Append** all incoming rows via `values.append`
+4. **Clear** inherited formatting on the new rows via `repeatCell`
 
 ### GoogleSheetsCreateSpreadsheetOperator
 
@@ -384,10 +383,10 @@ See the `examples/` directory for complete DAG examples:
 
 - `example_read.py` — reading with various configurations
 - `example_write.py` — overwrite and append modes
-- `example_smart_merge.py` — smart merge scenarios
+- `example_smart_merge.py` — merge scenarios
 - `example_manage.py` — creating spreadsheets and sheets
 - `example_sheets_to_bigquery.py` — Google Sheets → BigQuery (overwrite, append, date-range update)
-- `example_bigquery_to_sheets.py` — BigQuery → Google Sheets (overwrite, smart merge by date)
+- `example_bigquery_to_sheets.py` — BigQuery → Google Sheets (overwrite, merge by date)
 
 ## License
 

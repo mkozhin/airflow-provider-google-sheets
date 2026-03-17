@@ -8,7 +8,7 @@ def get_provider_info():
     return {
         "package-name": "airflow-provider-google-sheets",
         "name": "Google Sheets",
-        "description": "`Google Sheets <https://docs.google.com/spreadsheets/>`__ provider for Apache Airflow — read, write, and smart merge spreadsheets.",
+        "description": "`Google Sheets <https://docs.google.com/spreadsheets/>`__ provider for Apache Airflow — read, write, and merge spreadsheets.",
         "versions": [__version__],
         "integrations": [
             {

@@ -262,7 +262,6 @@ class GoogleSheetsHook(BaseHook):
         result = self.get_conn().spreadsheets().create(body=body).execute()
         return result["spreadsheetId"]
 
-    @retry_with_backoff()
     def create_sheet(self, spreadsheet_id: str, title: str) -> dict:
         """Add a new sheet (tab) to an existing spreadsheet."""
         request = {"addSheet": {"properties": {"title": title}}}
