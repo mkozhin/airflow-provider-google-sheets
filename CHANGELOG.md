@@ -1,9 +1,18 @@
 # Changelog
 
+## v0.7.1
+
+- **Fixed:** `merge` mode no longer resets `numberFormat` (date/number display formats) on newly appended rows. The `repeatCell` cleanup now clears only visual styles (font, background, borders, alignment) while preserving data display formats
+
 ## v0.7.0
 
 - **Fixed:** `merge` mode no longer inherits header row formatting on newly appended rows. Replaced `appendDimension` + `batch_update_values` with `values.append` (creates rows and writes data in one API call) followed by a `repeatCell` request that explicitly clears `userEnteredFormat` on only the written columns
 - **Renamed:** `write_mode="smart_merge"` → `write_mode="merge"`. The old name `"smart_merge"` remains accepted as a silent alias with no deprecation warning or breaking change. Internal method renamed `_execute_smart_merge` → `_execute_merge`
+- **Fixed:** double retry in `create_sheet` — removed redundant `@retry_with_backoff` decorator since it delegates to `batch_update` which already retries
+- **Fixed:** `"smart merge"` → `"merge"` in provider description (`__init__.py`) and docstring (`write.py`)
+- **Fixed:** removed unused `Optional` import from `utils/headers.py`
+- **Fixed:** Russian README now documents all 3 connection options (A/B/C), matching the English version
+
 
 ## v0.6.2
 

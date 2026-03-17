@@ -385,7 +385,21 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 if i + self.batch_size < len(append_rows):
                     time.sleep(self.pause_between_batches)
 
-            # Clear inherited formatting from the new rows
+            # Clear inherited visual formatting from the new rows,
+            # but preserve numberFormat (date/number display formats).
+            style_fields = (
+                "userEnteredFormat.textFormat,"
+                "userEnteredFormat.backgroundColor,"
+                "userEnteredFormat.backgroundColorStyle,"
+                "userEnteredFormat.borders,"
+                "userEnteredFormat.padding,"
+                "userEnteredFormat.horizontalAlignment,"
+                "userEnteredFormat.verticalAlignment,"
+                "userEnteredFormat.wrapStrategy,"
+                "userEnteredFormat.textDirection,"
+                "userEnteredFormat.textRotation,"
+                "userEnteredFormat.hyperlinkDisplayType"
+            )
             self._batched_batch_update(hook, [
                 {
                     "repeatCell": {
@@ -397,7 +411,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
                             "endColumnIndex": start_col_idx + len(headers),
                         },
                         "cell": {"userEnteredFormat": {}},
-                        "fields": "userEnteredFormat",
+                        "fields": style_fields,
                     }
                 }
             ])
