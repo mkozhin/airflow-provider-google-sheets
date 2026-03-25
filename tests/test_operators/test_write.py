@@ -749,10 +749,11 @@ class TestOverwriteRangeMode:
         op.execute(context)
 
         clear_range = mock_hook.clear_values.call_args[0][1]
-        assert clear_range == "Sheet1!A:C"
+        # default cell_range starts at A1, so clear begins from row 1
+        assert clear_range == "Sheet1!A1:C"
 
     def test_range_mode_with_cell_range(self, mock_hook, context):
-        """cell_range='B2:D' → clear columns B:D only."""
+        """cell_range='B2:D' → clear columns B:D starting from row 2 (preserves row 1)."""
         op = GoogleSheetsWriteOperator(
             task_id="test",
             spreadsheet_id=SPREADSHEET_ID,
@@ -766,7 +767,7 @@ class TestOverwriteRangeMode:
         op.execute(context)
 
         clear_range = mock_hook.clear_values.call_args[0][1]
-        assert clear_range == "Sheet1!B:D"
+        assert clear_range == "Sheet1!B2:D"
 
         write_range = mock_hook.update_values.call_args[0][1]
         assert "B2" in write_range
@@ -796,7 +797,28 @@ class TestOverwriteRangeMode:
         op.execute(context)
 
         clear_range = mock_hook.clear_values.call_args[0][1]
-        assert clear_range == "A:B"
+        # no sheet_name, default cell_range starts at A1
+        assert clear_range == "A1:B"
+
+    def test_range_mode_preserves_rows_above_start(self, mock_hook, context):
+        """cell_range='A3' — rows 1-2 (headers) must not be cleared."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="raw",
+            write_mode="overwrite",
+            clear_mode="range",
+            cell_range="A3",
+            data=[["val1", "val2"]],
+            has_headers=False,
+        )
+        op.execute(context)
+
+        clear_range = mock_hook.clear_values.call_args[0][1]
+        # Must start at row 3, not row 1
+        assert clear_range == "raw!A3:B"
+        assert "A1" not in clear_range
+        assert "A2" not in clear_range
 
 
 class TestOverwriteSheetModeTrim:
