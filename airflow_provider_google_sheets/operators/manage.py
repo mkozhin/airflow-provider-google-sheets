@@ -9,6 +9,7 @@ from typing import Any, Sequence
 from airflow.models import BaseOperator
 
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
+from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +149,112 @@ class GoogleSheetsListSheetsOperator(BaseOperator):
             self.spreadsheet_id,
         )
         return sheets
+
+
+class GoogleSheetsExtractPartitionsOperator(BaseOperator):
+    """Extract unique partition values from data for dynamic task mapping.
+
+    Reads data (inline, from XCom, or from a file), finds unique values in
+    the specified ``partition_column``, and returns a ``list[dict]`` suitable
+    for Airflow ``expand_kwargs``::
+
+        [
+            {"sheet_name": "Report 2026-01", "partition_value": "2026-01"},
+            {"sheet_name": "Report 2026-02", "partition_value": "2026-02"},
+        ]
+
+    This operator does **not** call the Google Sheets API — it works purely
+    with in-memory data.
+
+    Args:
+        partition_column: Column name whose unique values define partitions.
+        sheet_name_template: Python format string applied to each unique value.
+            Use ``{value}`` as the placeholder.  Defaults to ``"{value}"``.
+        data: Inline data (``list[list]``, ``list[dict]``, or a file path).
+        data_xcom_task_id: Pull data from this task's XCom instead.
+        data_xcom_key: XCom key when using *data_xcom_task_id*.
+        has_headers: Whether *data* contains a header row.  Must be ``True``
+            because partition column lookup requires headers.
+    """
+
+    template_fields: Sequence[str] = (
+        "partition_column",
+        "sheet_name_template",
+        "data_xcom_task_id",
+        "data_xcom_key",
+    )
+
+    def __init__(
+        self,
+        *,
+        partition_column: str,
+        sheet_name_template: str = "{value}",
+        data: Any = None,
+        data_xcom_task_id: str | None = None,
+        data_xcom_key: str = "return_value",
+        has_headers: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.partition_column = partition_column
+        self.sheet_name_template = sheet_name_template
+        self.data = data
+        self.data_xcom_task_id = data_xcom_task_id
+        self.data_xcom_key = data_xcom_key
+        self.has_headers = has_headers
+
+    def execute(self, context: Any) -> list[dict[str, str]]:
+        if not self.has_headers:
+            raise ValueError(
+                "has_headers must be True for GoogleSheetsExtractPartitionsOperator "
+                "because partition column lookup requires header names."
+            )
+
+        raw = self.data
+        if raw is None and self.data_xcom_task_id:
+            ti = context["ti"]
+            raw = ti.xcom_pull(
+                task_ids=self.data_xcom_task_id, key=self.data_xcom_key
+            )
+        if raw is None:
+            raise ValueError("No data provided: set 'data' or 'data_xcom_task_id'.")
+
+        headers, rows = normalize_input_data(raw, has_headers=self.has_headers)
+
+        if not headers:
+            if not rows:
+                logger.info("Empty data — returning empty partition list.")
+                return []
+            raise ValueError("Data has no headers — cannot locate partition column.")
+
+        if self.partition_column not in headers:
+            raise ValueError(
+                f"Partition column '{self.partition_column}' not found in headers: "
+                f"{headers}"
+            )
+
+        col_idx = headers.index(self.partition_column)
+
+        seen: dict[str, bool] = {}
+        unique_values: list[str] = []
+        for row in rows:
+            val = str(row[col_idx]) if col_idx < len(row) else ""
+            if val not in seen:
+                seen[val] = True
+                unique_values.append(val)
+
+        result = [
+            {
+                "sheet_name": self.sheet_name_template.format(value=v),
+                "partition_value": v,
+            }
+            for v in unique_values
+        ]
+
+        logger.info(
+            "Extracted %d partitions from column '%s': %s",
+            len(result),
+            self.partition_column,
+            [r["partition_value"] for r in result],
+        )
+        return result

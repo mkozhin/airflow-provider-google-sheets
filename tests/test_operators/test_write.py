@@ -1412,3 +1412,470 @@ class TestTableStart:
 
         assert result["deleted"] == 1
         assert result["appended"] == 1
+
+
+# ==================================================================
+# create_sheet_if_missing
+# ==================================================================
+
+
+class TestCreateSheetIfMissing:
+    def test_sheet_already_exists_no_create(self, mock_hook, context):
+        """When the sheet exists, create_sheet should not be called."""
+        mock_hook.get_spreadsheet_metadata.return_value = {
+            "sheets": [{"properties": {"sheetId": 0, "title": "Jan"}}]
+        }
+        mock_hook.get_sheet_properties.return_value = {
+            "sheetId": 0,
+            "title": "Jan",
+            "gridProperties": {"rowCount": 1000},
+        }
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Jan",
+            create_sheet_if_missing=True,
+            data=[["col"], [1]],
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        mock_hook.create_sheet.assert_not_called()
+
+    def test_sheet_missing_creates_it(self, mock_hook, context):
+        """When the sheet does not exist, create_sheet is called."""
+        # First call: metadata shows no "Feb" sheet
+        mock_hook.get_spreadsheet_metadata.return_value = {
+            "sheets": [{"properties": {"sheetId": 0, "title": "Jan"}}]
+        }
+        mock_hook.create_sheet.return_value = {"replies": [{}]}
+        mock_hook.get_sheet_properties.return_value = {
+            "sheetId": 1,
+            "title": "Feb",
+            "gridProperties": {"rowCount": 1000},
+        }
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Feb",
+            create_sheet_if_missing=True,
+            data=[["col"], [1]],
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        mock_hook.create_sheet.assert_called_once_with(SPREADSHEET_ID, "Feb")
+
+    def test_race_condition_http_400_swallowed(self, mock_hook, context):
+        """When create_sheet raises HTTP 400 (race condition), it is ignored."""
+        from googleapiclient.errors import HttpError
+        from httplib2 import Response
+
+        mock_hook.get_spreadsheet_metadata.return_value = {
+            "sheets": [{"properties": {"sheetId": 0, "title": "Jan"}}]
+        }
+        mock_hook.create_sheet.side_effect = HttpError(
+            Response({"status": 400}),
+            b"A sheet with the name 'Feb' already exists",
+        )
+        mock_hook.get_sheet_properties.return_value = {
+            "sheetId": 1,
+            "title": "Feb",
+            "gridProperties": {"rowCount": 1000},
+        }
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Feb",
+            create_sheet_if_missing=True,
+            data=[["col"], [1]],
+            pause_between_batches=0,
+        )
+        # Should not raise
+        op.execute(context)
+
+    def test_non_400_http_error_propagates(self, mock_hook, context):
+        """Non-400 HttpErrors from create_sheet should propagate."""
+        from googleapiclient.errors import HttpError
+        from httplib2 import Response
+
+        mock_hook.get_spreadsheet_metadata.return_value = {
+            "sheets": [{"properties": {"sheetId": 0, "title": "Jan"}}]
+        }
+        mock_hook.create_sheet.side_effect = HttpError(
+            Response({"status": 403}), b"Forbidden"
+        )
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Feb",
+            create_sheet_if_missing=True,
+            data=[["col"], [1]],
+            pause_between_batches=0,
+        )
+        with pytest.raises(HttpError):
+            op.execute(context)
+
+    def test_default_false_does_not_call_ensure(self, mock_hook, context):
+        """With create_sheet_if_missing=False (default), no metadata check."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            data=[["col"], [1]],
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # get_spreadsheet_metadata may be called by other methods,
+        # but create_sheet should never be called
+        mock_hook.create_sheet.assert_not_called()
+
+    def test_sheet_name_none_does_not_call_ensure(self, mock_hook, context):
+        """When sheet_name is None, _ensure_sheet_exists is not called."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            create_sheet_if_missing=True,
+            data=[["col"], [1]],
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        mock_hook.create_sheet.assert_not_called()
+
+
+# ==================================================================
+# partition_by / partition_value
+# ==================================================================
+
+
+class TestPartitionBy:
+    def test_filters_correct_rows(self, mock_hook, context):
+        """Only rows matching partition_value are written."""
+        data = [
+            {"period": "2026-01", "val": 10},
+            {"period": "2026-02", "val": 20},
+            {"period": "2026-01", "val": 30},
+            {"period": "2026-03", "val": 40},
+        ]
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            partition_by="period",
+            partition_value="2026-01",
+            data=data,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["rows_written"] == 3  # 1 header + 2 data rows
+        # Check that update_values was called with filtered data
+        written_rows = []
+        for c in mock_hook.update_values.call_args_list:
+            written_rows.extend(c[0][2])  # third positional arg = values
+        # Header row + two "2026-01" rows
+        assert len(written_rows) == 3
+        assert written_rows[0] == ["period", "val"]  # header
+        assert written_rows[1] == ["2026-01", 10]
+        assert written_rows[2] == ["2026-01", 30]
+
+    def test_numeric_partition_value_match(self, mock_hook, context):
+        """Integer values in data match string partition_value."""
+        data = [
+            {"year": 2024, "amount": 100},
+            {"year": 2025, "amount": 200},
+            {"year": 2024, "amount": 300},
+        ]
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            partition_by="year",
+            partition_value="2024",
+            data=data,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["rows_written"] == 3  # header + 2 rows
+
+    def test_no_matches_writes_empty(self, mock_hook, context):
+        """No matching rows → only header written (overwrite mode)."""
+        data = [
+            {"period": "2026-01", "val": 10},
+        ]
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            partition_by="period",
+            partition_value="2026-99",
+            data=data,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["rows_written"] == 1  # header only
+
+    def test_column_not_found_raises(self, mock_hook, context):
+        data = [{"period": "2026-01", "val": 10}]
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            partition_by="nonexistent",
+            partition_value="x",
+            data=data,
+            pause_between_batches=0,
+        )
+        with pytest.raises(ValueError, match="not found in headers"):
+            op.execute(context)
+
+    def test_partition_by_none_no_filtering(self, mock_hook, context):
+        """Without partition_by, all rows are written."""
+        data = [
+            {"a": 1, "b": 2},
+            {"a": 3, "b": 4},
+        ]
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            data=data,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["rows_written"] == 3  # header + 2 rows
+
+    def test_partition_by_without_value_raises(self, mock_hook, context):
+        data = [{"period": "2026-01", "val": 10}]
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            partition_by="period",
+            # partition_value not set
+            data=data,
+            pause_between_batches=0,
+        )
+        with pytest.raises(ValueError, match="partition_value is required"):
+            op.execute(context)
+
+    def test_partition_by_with_merge_mode(self, mock_hook, context):
+        """partition_by filters data before merge runs — only matching rows are merged."""
+        mock_hook.get_values.return_value = []  # empty sheet
+        data = [
+            {"key": "a", "period": "2026-01", "val": 10},
+            {"key": "b", "period": "2026-02", "val": 20},
+            {"key": "c", "period": "2026-01", "val": 30},
+        ]
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="merge",
+            merge_key="key",
+            partition_by="period",
+            partition_value="2026-01",
+            data=data,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        # Only 2026-01 rows (key=a, key=c) were passed to merge
+        assert result["appended"] == 2
+
+    def test_partition_with_append_mode(self, mock_hook, context):
+        """partition_by works with append mode too."""
+        data = [
+            {"region": "US", "sales": 100},
+            {"region": "EU", "sales": 200},
+            {"region": "US", "sales": 300},
+        ]
+        mock_hook.get_values.return_value = [["region", "sales"]]
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="append",
+            partition_by="region",
+            partition_value="US",
+            data=data,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["rows_written"] == 2  # only US rows appended
+
+
+# ==================================================================
+# column_mapping
+# ==================================================================
+
+
+class TestColumnMapping:
+    """Tests for column_mapping parameter in GoogleSheetsWriteOperator."""
+
+    def test_full_mapping_headers_written_to_sheet(self, mock_hook, context):
+        """All columns renamed — sheet receives mapped header names."""
+        data = [{"date_period": "2026-01", "revenue": 100}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            data=data,
+            column_mapping={"date_period": "Период", "revenue": "Выручка"},
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        written = mock_hook.update_values.call_args[0][2]
+        assert written[0] == ["Период", "Выручка"]
+        assert written[1] == ["2026-01", 100]
+
+    def test_partial_mapping_unmapped_kept_as_is(self, mock_hook, context):
+        """Only specified columns renamed; unmapped columns written with original names."""
+        data = [{"date_period": "2026-01", "revenue": 100, "region": "US"}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            data=data,
+            column_mapping={"date_period": "Период"},
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        written = mock_hook.update_values.call_args[0][2]
+        assert written[0] == ["Период", "revenue", "region"]
+
+    def test_mapping_none_headers_unchanged(self, mock_hook, context):
+        """No mapping — original headers written to sheet (no regression)."""
+        data = [{"date_period": "2026-01", "revenue": 100}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            data=data,
+            column_mapping=None,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        written = mock_hook.update_values.call_args[0][2]
+        assert written[0] == ["date_period", "revenue"]
+
+    def test_mapping_with_append_mode(self, mock_hook, context):
+        """Mapping works in append mode — mapped headers written when sheet is empty."""
+        mock_hook.get_values.return_value = []  # empty sheet
+        data = [{"col_a": "x", "col_b": "y"}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="append",
+            data=data,
+            column_mapping={"col_a": "Колонка А", "col_b": "Колонка Б"},
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # First update_values call writes headers
+        header_call = mock_hook.update_values.call_args_list[0]
+        assert header_call[0][2] == [["Колонка А", "Колонка Б"]]
+
+    def test_mapping_with_merge_mode_merge_key_uses_original_name(self, mock_hook, context):
+        """merge_key references original column name even when mapping renames it.
+
+        column_mapping = {"period": "Период"}, merge_key = "period"
+        Sheet is empty → headers written as ["Период", "rev"], merge works.
+        """
+        mock_hook.get_values.return_value = []  # empty sheet
+        data = [{"period": "2026-01", "rev": 100}, {"period": "2026-02", "rev": 200}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="merge",
+            merge_key="period",  # original column name
+            data=data,
+            column_mapping={"period": "Период"},
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        # Merge completed without ValueError
+        assert result["appended"] == 2
+        # Headers written with mapped name
+        header_call = mock_hook.update_values.call_args
+        assert header_call[0][2] == [["Период", "rev"]]
+
+    def test_mapping_with_partition_by_uses_original_name(self, mock_hook, context):
+        """partition_by references original column name when mapping is active."""
+        data = [
+            {"period": "2026-01", "rev": 100},
+            {"period": "2026-02", "rev": 200},
+            {"period": "2026-01", "rev": 300},
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            data=data,
+            partition_by="period",       # original column name
+            partition_value="2026-01",
+            column_mapping={"period": "Период", "rev": "Выручка"},
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        written = mock_hook.update_values.call_args[0][2]
+        assert written[0] == ["Период", "Выручка"]   # mapped headers
+        assert len(written) == 3                      # header + 2 matching rows
+
+    def test_mapping_with_file_input(self, mock_hook, context, tmp_dir):
+        """Mapping works when data is a .jsonl file path."""
+        path = os.path.join(tmp_dir, "data.jsonl")
+        with open(path, "w") as f:
+            f.write('{"src_col": "val1", "amount": 10}\n')
+            f.write('{"src_col": "val2", "amount": 20}\n')
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Sheet1",
+            write_mode="overwrite",
+            data=path,
+            column_mapping={"src_col": "Источник", "amount": "Сумма"},
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        written = mock_hook.update_values.call_args[0][2]
+        assert written[0] == ["Источник", "Сумма"]
+        assert written[1] == ["val1", 10]
+        assert written[2] == ["val2", 20]
+

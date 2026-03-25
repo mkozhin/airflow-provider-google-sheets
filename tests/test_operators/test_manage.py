@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +14,7 @@ from httplib2 import Response
 from airflow_provider_google_sheets.operators.manage import (
     GoogleSheetsCreateSheetOperator,
     GoogleSheetsCreateSpreadsheetOperator,
+    GoogleSheetsExtractPartitionsOperator,
     GoogleSheetsListSheetsOperator,
 )
 
@@ -262,3 +266,239 @@ class TestListSheets:
 
         assert isinstance(result, list)
         assert all(isinstance(s, str) for s in result)
+
+
+# ------------------------------------------------------------------
+# ExtractPartitions
+# ------------------------------------------------------------------
+
+
+class TestExtractPartitions:
+    def test_inline_list_of_dicts(self, context):
+        data = [
+            {"period": "2026-01", "value": 10},
+            {"period": "2026-02", "value": 20},
+            {"period": "2026-01", "value": 30},
+            {"period": "2026-03", "value": 40},
+        ]
+
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="period",
+            data=data,
+        )
+        result = op.execute(context)
+
+        assert result == [
+            {"sheet_name": "2026-01", "partition_value": "2026-01"},
+            {"sheet_name": "2026-02", "partition_value": "2026-02"},
+            {"sheet_name": "2026-03", "partition_value": "2026-03"},
+        ]
+
+    def test_custom_template(self, context):
+        data = [
+            {"segment": "A", "val": 1},
+            {"segment": "B", "val": 2},
+        ]
+
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="segment",
+            sheet_name_template="Отчёт {value}",
+            data=data,
+        )
+        result = op.execute(context)
+
+        assert result == [
+            {"sheet_name": "Отчёт A", "partition_value": "A"},
+            {"sheet_name": "Отчёт B", "partition_value": "B"},
+        ]
+
+    def test_numeric_partition_values(self, context):
+        data = [
+            {"year": 2024, "amount": 100},
+            {"year": 2025, "amount": 200},
+            {"year": 2024, "amount": 300},
+        ]
+
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="year",
+            data=data,
+        )
+        result = op.execute(context)
+
+        assert result == [
+            {"sheet_name": "2024", "partition_value": "2024"},
+            {"sheet_name": "2025", "partition_value": "2025"},
+        ]
+        # partition_value is always a string
+        assert all(isinstance(r["partition_value"], str) for r in result)
+
+    def test_xcom_data(self, context):
+        xcom_data = [
+            {"region": "US", "sales": 100},
+            {"region": "EU", "sales": 200},
+        ]
+        context["ti"].xcom_pull.return_value = xcom_data
+
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="region",
+            data_xcom_task_id="fetch_data",
+        )
+        result = op.execute(context)
+
+        context["ti"].xcom_pull.assert_called_once_with(
+            task_ids="fetch_data", key="return_value"
+        )
+        assert result == [
+            {"sheet_name": "US", "partition_value": "US"},
+            {"sheet_name": "EU", "partition_value": "EU"},
+        ]
+
+    def test_empty_data(self, context):
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="period",
+            data=[],
+        )
+        result = op.execute(context)
+
+        assert result == []
+
+    def test_column_not_found_raises(self, context):
+        data = [{"period": "2026-01", "value": 10}]
+
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="nonexistent",
+            data=data,
+        )
+        with pytest.raises(ValueError, match="not found in headers"):
+            op.execute(context)
+
+    def test_has_headers_false_raises(self, context):
+        data = [["2026-01", 10], ["2026-02", 20]]
+
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="period",
+            has_headers=False,
+            data=data,
+        )
+        with pytest.raises(ValueError, match="has_headers must be True"):
+            op.execute(context)
+
+    def test_deduplication_preserves_order(self, context):
+        data = [
+            {"cat": "C", "v": 1},
+            {"cat": "A", "v": 2},
+            {"cat": "B", "v": 3},
+            {"cat": "A", "v": 4},
+            {"cat": "C", "v": 5},
+        ]
+
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="cat",
+            data=data,
+        )
+        result = op.execute(context)
+
+        assert [r["partition_value"] for r in result] == ["C", "A", "B"]
+
+    def test_jsonl_file(self, context):
+        """Primary use case: data from a JSONL file."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False
+        ) as f:
+            for row in [
+                {"period": "2026-01", "amount": 100},
+                {"period": "2026-02", "amount": 200},
+                {"period": "2026-01", "amount": 150},
+                {"period": "2026-03", "amount": 300},
+            ]:
+                json.dump(row, f)
+                f.write("\n")
+            path = f.name
+
+        try:
+            op = GoogleSheetsExtractPartitionsOperator(
+                task_id="test",
+                partition_column="period",
+                sheet_name_template="Report {value}",
+                data=path,
+            )
+            result = op.execute(context)
+
+            assert result == [
+                {"sheet_name": "Report 2026-01", "partition_value": "2026-01"},
+                {"sheet_name": "Report 2026-02", "partition_value": "2026-02"},
+                {"sheet_name": "Report 2026-03", "partition_value": "2026-03"},
+            ]
+        finally:
+            os.unlink(path)
+
+    def test_csv_file(self, context):
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False
+        ) as f:
+            f.write("region,sales\n")
+            f.write("US,100\n")
+            f.write("EU,200\n")
+            f.write("US,300\n")
+            path = f.name
+
+        try:
+            op = GoogleSheetsExtractPartitionsOperator(
+                task_id="test",
+                partition_column="region",
+                data=path,
+            )
+            result = op.execute(context)
+
+            assert result == [
+                {"sheet_name": "US", "partition_value": "US"},
+                {"sheet_name": "EU", "partition_value": "EU"},
+            ]
+        finally:
+            os.unlink(path)
+
+    def test_json_file_via_xcom(self, context):
+        """File path passed through XCom."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False
+        ) as f:
+            for row in [
+                {"cat": "A", "v": 1},
+                {"cat": "B", "v": 2},
+            ]:
+                json.dump(row, f)
+                f.write("\n")
+            path = f.name
+
+        try:
+            context["ti"].xcom_pull.return_value = path
+
+            op = GoogleSheetsExtractPartitionsOperator(
+                task_id="test",
+                partition_column="cat",
+                data_xcom_task_id="upstream",
+            )
+            result = op.execute(context)
+
+            assert result == [
+                {"sheet_name": "A", "partition_value": "A"},
+                {"sheet_name": "B", "partition_value": "B"},
+            ]
+        finally:
+            os.unlink(path)
+
+    def test_no_data_raises(self, context):
+        op = GoogleSheetsExtractPartitionsOperator(
+            task_id="test",
+            partition_column="period",
+        )
+        with pytest.raises(ValueError, match="No data provided"):
+            op.execute(context)

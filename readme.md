@@ -13,7 +13,8 @@ Apache Airflow provider for Google Sheets API v4. Read, write, and manage Google
 - **Read** data from Google Sheets with chunked streaming, schema-based type conversion, and CSV/JSON/JSONL/XCom output
 - **Write** data in three modes: overwrite, append, and merge (upsert by key)
 - **Merge** — update, insert, and delete rows based on a key column with correct index recalculation
-- **Manage** spreadsheets — create new spreadsheets, sheets, and list sheets with filtering
+- **Manage** spreadsheets — create new spreadsheets, sheets, list sheets with filtering, and auto-create sheets on write
+- **Partitioned write** — fan-out data to multiple sheets by a column value using Airflow dynamic task mapping
 - **Large datasets** — streaming read/write without loading everything into memory
 - **Schema support** — automatic type conversion (date, int, float, bool) on read and write
 - **Header processing** — deduplication, Cyrillic transliteration (on by default), special character removal, lowercase conversion, snake_case normalization
@@ -260,6 +261,10 @@ merge_offset = GoogleSheetsWriteOperator(
 | `pause_between_batches` | float | `1.0` | Seconds between batches |
 | `merge_key` | str | `None` | Key column for merge mode |
 | `table_start` | str | `"A1"` | Top-left cell of the table (e.g. `"C3"`). Used by `append` and `merge` to locate the header and resolve column positions. Defaults to `"A1"` |
+| `create_sheet_if_missing` | bool | `False` | When `True`, create the target sheet if it does not exist. Safe to use with parallel tasks — concurrent creation attempts are handled gracefully |
+| `partition_by` | str | `None` | Column name to filter data by before writing. Only rows where the column value matches `partition_value` are written |
+| `partition_value` | str | `None` | Value to match against `partition_by` column. Required when `partition_by` is set |
+| `column_mapping` | dict | `None` | Rename headers before writing: `{"source_col": "Sheet Header"}`. Applied after all filtering — `merge_key`, `partition_by`, and `schema` always reference the **original** column names from the input data |
 
 **Data input formats:**
 - `list[dict]` — headers auto-detected from keys
@@ -342,6 +347,56 @@ read_each = GoogleSheetsReadOperator.partial(
 | `name_pattern` | str | `None` | Regex to include sheets by name (`re.search`) |
 | `exclude_pattern` | str | `None` | Regex to exclude sheets by name (`re.search`) |
 | `index_range` | tuple[int, int] | `None` | Positional slice `(start, end)`, 0-based, start inclusive, end exclusive |
+
+### GoogleSheetsExtractPartitionsOperator
+
+Extract unique partition values from data and return a list of `{"sheet_name", "partition_value"}` dicts for Airflow `expand_kwargs`. Does **not** call the Google Sheets API — operates purely on in-memory data.
+
+Primary use case: fan-out writing where each unique value in a column maps to its own sheet.
+
+```python
+from airflow_provider_google_sheets.operators.manage import (
+    GoogleSheetsExtractPartitionsOperator,
+)
+from airflow_provider_google_sheets.operators.write import GoogleSheetsWriteOperator
+
+# Returns [{"sheet_name": "Report 2026-01", "partition_value": "2026-01"}, ...]
+partitions = GoogleSheetsExtractPartitionsOperator(
+    task_id="get_partitions",
+    data_xcom_task_id="fetch_data",   # or data="/path/to/file.jsonl"
+    partition_column="period",
+    sheet_name_template="Report {value}",   # optional, default = "{value}"
+)
+
+# Write each partition to its own sheet — one Airflow task per partition
+write = GoogleSheetsWriteOperator.partial(
+    task_id="write_to_sheet",
+    spreadsheet_id="your-spreadsheet-id",
+    data_xcom_task_id="fetch_data",
+    partition_by="period",          # filter data inside each task
+    create_sheet_if_missing=True,   # create sheet if it doesn't exist
+    write_mode="overwrite",
+).expand_kwargs(partitions.output)
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `partition_column` | str | — | Column name whose unique values define partitions |
+| `sheet_name_template` | str | `"{value}"` | Format string for sheet names. Use `{value}` as placeholder |
+| `data` | Any | `None` | Data: `list[dict]`, `list[list]`, or file path (`.jsonl`, `.csv`) |
+| `data_xcom_task_id` | str | `None` | Pull data from this task's XCom |
+| `data_xcom_key` | str | `"return_value"` | XCom key |
+| `has_headers` | bool | `True` | Must be `True` — partition column lookup requires headers |
+
+**Returns:** `list[dict]` — one entry per unique partition value, in order of first appearance:
+```python
+[
+    {"sheet_name": "Report 2026-01", "partition_value": "2026-01"},
+    {"sheet_name": "Report 2026-02", "partition_value": "2026-02"},
+]
+```
 
 ## Schema
 

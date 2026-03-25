@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.0
+
+- **Added:** `GoogleSheetsExtractPartitionsOperator` — extracts unique partition values from data and returns a `list[dict]` for Airflow `expand_kwargs`, enabling fan-out writes where each unique column value maps to its own sheet
+- **Added:** `create_sheet_if_missing` parameter to `GoogleSheetsWriteOperator` (default `False`) — when `True`, creates the target sheet if it does not exist; handles parallel task race conditions (HTTP 400) gracefully
+- **Added:** `partition_by` and `partition_value` parameters to `GoogleSheetsWriteOperator` — filters data inside the operator so only rows matching the partition value are written
+- **Added:** `column_mapping` parameter to `GoogleSheetsWriteOperator` — renames column headers before writing (`{"source_col": "Sheet Header"}`). Applied after partition filtering and schema formatting, so `merge_key`, `partition_by`, and `schema` always reference original column names from the input data; not supported with `merge` mode
+
 ## v0.7.2
 
 - **Fixed:** `overwrite` mode with `clear_mode="range"` no longer clears rows above `cell_range`. Previously the clear range was built as `A:E` (entire column from row 1), so rows before the start row (e.g. headers in rows 1–2 when `cell_range="A3"`) were erased. The range now includes the start row: `A3:E`

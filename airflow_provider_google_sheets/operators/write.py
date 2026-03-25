@@ -9,6 +9,8 @@ from typing import Any, Sequence
 
 from airflow.models import BaseOperator
 
+from googleapiclient.errors import HttpError
+
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
 from airflow_provider_google_sheets.utils.schema import format_row_for_write
@@ -48,6 +50,16 @@ class GoogleSheetsWriteOperator(BaseOperator):
         table_start: Top-left cell of the table (e.g. ``"A1"``, ``"C3"``).
             Used by *append* and *merge* to locate the header row and
             compute absolute column positions.  Defaults to ``"A1"``.
+        create_sheet_if_missing: When ``True``, create the target sheet (tab)
+            if it does not already exist.  Defaults to ``False``.
+        partition_by: Column name to filter data by.  When set, only rows
+            where ``str(row[partition_by]) == partition_value`` are written.
+        partition_value: The value to match against when *partition_by* is set.
+        column_mapping: Optional ``{source_name: sheet_name}`` dict that renames
+            column headers before writing.  Headers not present in the mapping
+            are written as-is.  Applied *after* ``partition_by``, ``schema``, and
+            ``merge_key`` resolution so all other parameters reference the
+            **original** column names from the input data.
     """
 
     template_fields: Sequence[str] = (
@@ -58,6 +70,9 @@ class GoogleSheetsWriteOperator(BaseOperator):
         "data",
         "data_xcom_task_id",
         "clear_mode",
+        "partition_by",
+        "partition_value",
+        "column_mapping",
     )
 
     def __init__(
@@ -79,6 +94,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
         pause_between_batches: float = 1.0,
         merge_key: str | None = None,
         table_start: str = "A1",
+        create_sheet_if_missing: bool = False,
+        partition_by: str | None = None,
+        partition_value: str | None = None,
+        column_mapping: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -98,6 +117,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.pause_between_batches = pause_between_batches
         self.merge_key = merge_key
         self.table_start = table_start
+        self.create_sheet_if_missing = create_sheet_if_missing
+        self.partition_by = partition_by
+        self.partition_value = partition_value
+        self.column_mapping = column_mapping
 
     # ------------------------------------------------------------------
     # helpers
@@ -122,21 +145,86 @@ class GoogleSheetsWriteOperator(BaseOperator):
             return rows
         return [format_row_for_write(r, headers, self.schema) for r in rows]
 
+    def _apply_partition(
+        self, headers: list[str] | None, rows: list[list[Any]]
+    ) -> list[list[Any]]:
+        """Filter rows by partition_by column matching partition_value."""
+        if self.partition_by is None:
+            return rows
+        if self.partition_value is None:
+            raise ValueError(
+                "partition_value is required when partition_by is set."
+            )
+        if not headers:
+            raise ValueError(
+                "Headers are required for partition filtering."
+            )
+        if self.partition_by not in headers:
+            raise ValueError(
+                f"partition_by column '{self.partition_by}' not found in "
+                f"headers: {headers}"
+            )
+        idx = headers.index(self.partition_by)
+        filtered = [
+            r for r in rows
+            if idx < len(r) and str(r[idx]) == self.partition_value
+        ]
+        logger.info(
+            "Partition filter: %d/%d rows match %s=%s",
+            len(filtered), len(rows), self.partition_by, self.partition_value,
+        )
+        return filtered
+
+    def _apply_column_mapping(self, headers: list[str] | None) -> list[str] | None:
+        """Rename headers according to column_mapping (original → sheet name)."""
+        if not self.column_mapping or not headers:
+            return headers
+        return [self.column_mapping.get(h, h) for h in headers]
+
+    def _ensure_sheet_exists(
+        self, hook: GoogleSheetsHook, spreadsheet_id: str, sheet_name: str
+    ) -> None:
+        """Create the sheet if it does not exist (when create_sheet_if_missing is True)."""
+        meta = hook.get_spreadsheet_metadata(spreadsheet_id)
+        existing = {s["properties"]["title"] for s in meta.get("sheets", [])}
+        if sheet_name not in existing:
+            try:
+                hook.create_sheet(spreadsheet_id, sheet_name)
+                logger.info("Created missing sheet '%s'", sheet_name)
+            except HttpError as e:
+                if e.resp.status == 400:
+                    # Race condition: another task already created the sheet
+                    logger.info(
+                        "Sheet '%s' was created by another task (race condition)",
+                        sheet_name,
+                    )
+                else:
+                    raise
+
     # ------------------------------------------------------------------
     # execute
     # ------------------------------------------------------------------
 
     def execute(self, context: Any) -> dict[str, Any]:
         hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
+
+        if self.create_sheet_if_missing and self.sheet_name:
+            self._ensure_sheet_exists(hook, self.spreadsheet_id, self.sheet_name)
+
         headers, rows = self._resolve_data(context)
         rows = self._format_rows(headers, rows)
+        rows = self._apply_partition(headers, rows)
+        # Apply column_mapping last so that partition_by, schema, and merge_key
+        # all reference the original column names from the input data.
+        original_headers = headers
+        headers = self._apply_column_mapping(headers)
 
         if self.write_mode == "overwrite":
             return self._execute_overwrite(hook, headers, rows)
         if self.write_mode == "append":
             return self._execute_append(hook, headers, rows)
         if self.write_mode in ("merge", "smart_merge"):
-            return self._execute_merge(hook, headers, rows)
+            return self._execute_merge(hook, headers, rows, original_headers=original_headers)
 
         raise ValueError(f"Unknown write_mode: '{self.write_mode}'")
 
@@ -272,17 +360,21 @@ class GoogleSheetsWriteOperator(BaseOperator):
         hook: GoogleSheetsHook,
         headers: list[str] | None,
         rows: list[list[Any]],
+        original_headers: list[str] | None = None,
     ) -> dict[str, Any]:
+        # Use original_headers (pre-mapping) for merge_key lookup so that
+        # merge_key always references the input data column names.
+        key_lookup = original_headers if original_headers is not None else headers
         if not self.merge_key:
             raise ValueError("merge_key is required for merge mode")
-        if not headers:
+        if not key_lookup:
             raise ValueError("Headers are required for merge mode")
-        if self.merge_key not in headers:
+        if self.merge_key not in key_lookup:
             raise ValueError(
-                f"merge_key '{self.merge_key}' not found in headers: {headers}"
+                f"merge_key '{self.merge_key}' not found in headers: {key_lookup}"
             )
 
-        key_col_idx = headers.index(self.merge_key)
+        key_col_idx = key_lookup.index(self.merge_key)
         prefix = self._sheet_prefix()
 
         # Step 1 — Resolve table start position
