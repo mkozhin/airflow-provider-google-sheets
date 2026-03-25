@@ -198,7 +198,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
             # clear_mode == "range": clear only the data columns
             start_col_idx = self._column_letter_to_index(start_col)
             end_col = self._index_to_column_letter(start_col_idx + num_data_cols - 1) if num_data_cols else start_col
-            clear_range = f"{prefix}{start_col}:{end_col}"
+            clear_range = f"{prefix}{start_col}{start_row_num}:{end_col}"
             logger.info("Clearing range %s", clear_range)
             hook.clear_values(self.spreadsheet_id, clear_range)
 

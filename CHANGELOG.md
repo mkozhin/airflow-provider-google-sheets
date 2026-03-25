@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.7.2
+
+- **Fixed:** `overwrite` mode with `clear_mode="range"` no longer clears rows above `cell_range`. Previously the clear range was built as `A:E` (entire column from row 1), so rows before the start row (e.g. headers in rows 1–2 when `cell_range="A3"`) were erased. The range now includes the start row: `A3:E`
+
 ## v0.7.1
 
 - **Fixed:** `merge` mode no longer resets `numberFormat` (date/number display formats) on newly appended rows. The `repeatCell` cleanup now clears only visual styles (font, background, borders, alignment) while preserving data display formats
