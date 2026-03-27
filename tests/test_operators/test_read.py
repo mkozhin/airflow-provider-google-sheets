@@ -727,6 +727,75 @@ class TestStreamingOutput:
         result = op.execute(context)
         assert len(result) == 3
 
+    def test_xcom_max_bytes_exceeded(self, mock_hook, context):
+        """XCom output raises when estimated size exceeds max_xcom_bytes."""
+        mock_hook.get_values.side_effect = [
+            [["col"]],
+            [["x" * 100], ["x" * 100]],
+        ]
+
+        from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            max_xcom_bytes=10,
+        )
+        with pytest.raises(GoogleSheetsDataError, match="max_xcom_bytes"):
+            op.execute(context)
+
+    def test_xcom_max_bytes_ok_under_limit(self, mock_hook, context):
+        """XCom output works normally when size is under max_xcom_bytes."""
+        mock_hook.get_values.side_effect = [
+            [["col"]],
+            [["a"], ["b"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            max_xcom_bytes=10_000_000,
+        )
+        result = op.execute(context)
+        assert len(result) == 2
+
+    def test_xcom_max_bytes_none_no_check(self, mock_hook, context):
+        """max_xcom_bytes=None (default) does not raise even for larger payloads."""
+        mock_hook.get_values.side_effect = [
+            [["col"]],
+            [["x" * 100], ["x" * 100]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            max_xcom_bytes=None,
+        )
+        result = op.execute(context)
+        assert len(result) == 2
+
+    def test_xcom_large_payload_warning(self, mock_hook, context, caplog):
+        """Payload > 5 MB triggers a warning even without max_xcom_bytes."""
+        import logging
+        from unittest.mock import patch
+
+        large_rows = [["x" * 200] for _ in range(30_000)]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            has_headers=True,
+            max_xcom_bytes=None,
+        )
+        with patch.object(op, "_read_chunks", return_value=iter([large_rows])), \
+             caplog.at_level(logging.WARNING):
+            op._read_to_xcom(mock_hook, ["col"], 2)
+
+        assert "XCom payload is large" in caplog.text
+
 
 # ------------------------------------------------------------------
 # Range building fix (cell_range=None)
@@ -923,3 +992,75 @@ class TestRowFilterValidation:
         )
         with pytest.raises(ValueError, match="unknown op 'like'"):
             op.execute(context)
+
+
+class TestRowSkipMissingColumn:
+    def test_skip_condition_on_absent_column_is_ignored(self, mock_hook, context):
+        """When the column referenced in row_skip does not exist, the condition
+        is silently ignored and the row is NOT skipped."""
+        mock_hook.get_values.side_effect = [
+            [["name", "value"]],
+            [["Alice", "10"], ["Bob", "20"]],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            row_skip={"column": "nonexistent", "value": "Alice"},
+        )
+        result = op.execute(context)
+
+        # Both rows pass through — the missing column condition is ignored
+        assert len(result) == 2
+
+
+class TestRowStopMultipleConditions:
+    def test_stop_on_any_condition_or_logic(self, mock_hook, context):
+        """row_stop with a list stops at the first row matching ANY condition."""
+        mock_hook.get_values.side_effect = [
+            [["name", "type"]],
+            [
+                ["Item1", "data"],
+                ["Item2", "data"],
+                ["ИТОГО", "data"],      # matches first condition
+                ["Item4", "data"],
+            ],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            row_stop=[
+                {"column": "name", "value": "ИТОГО"},
+                {"column": "type", "op": "starts_with", "value": "total_"},
+            ],
+        )
+        result = op.execute(context)
+
+        assert result == [
+            {"name": "Item1", "type": "data"},
+            {"name": "Item2", "type": "data"},
+        ]
+
+    def test_stop_on_second_condition_when_first_does_not_match(self, mock_hook, context):
+        """Stop triggered by the second condition in the list."""
+        mock_hook.get_values.side_effect = [
+            [["name", "type"]],
+            [
+                ["Item1", "data"],
+                ["Item2", "total_summary"],  # matches second condition
+                ["Item3", "data"],
+            ],
+        ]
+
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            row_stop=[
+                {"column": "name", "value": "ИТОГО"},
+                {"column": "type", "op": "starts_with", "value": "total_"},
+            ],
+        )
+        result = op.execute(context)
+
+        assert result == [{"name": "Item1", "type": "data"}]

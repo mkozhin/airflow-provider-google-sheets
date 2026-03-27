@@ -119,6 +119,27 @@ class TestApplySchemaToValue:
         result = apply_schema_to_value(dt, {"type": "date"})
         assert result == date(2024, 1, 1)
 
+    def test_date_input_format_differs_from_format(self):
+        result = apply_schema_to_value(
+            "2026-03-01",
+            {"type": "date", "input_format": "%Y-%m-%d", "format": "%d.%m.%Y"},
+        )
+        assert result == date(2026, 3, 1)
+
+    def test_datetime_input_format(self):
+        result = apply_schema_to_value(
+            "2026-03-01 12:00",
+            {"type": "datetime", "input_format": "%Y-%m-%d %H:%M", "format": "%d.%m.%Y %H:%M"},
+        )
+        assert result == datetime(2026, 3, 1, 12, 0)
+
+    def test_input_format_not_affects_format_value_for_write(self):
+        result = format_value_for_write(
+            date(2026, 3, 1),
+            {"type": "date", "input_format": "%Y-%m-%d", "format": "%d.%m.%Y"},
+        )
+        assert result == "01.03.2026"
+
 
 class TestLenientNumericParsing:
     """Tests for numeric columns with ``default`` field (lenient mode)."""

@@ -1120,16 +1120,15 @@ class TestColumnLetterConversion:
 
 
 class TestUnknownWriteMode:
-    def test_raises_on_unknown_mode(self, mock_hook, context):
-        op = GoogleSheetsWriteOperator(
-            task_id="test",
-            spreadsheet_id=SPREADSHEET_ID,
-            write_mode="invalid",
-            data=[["x"]],
-            has_headers=False,
-        )
-        with pytest.raises(ValueError, match="Unknown write_mode"):
-            op.execute(context)
+    def test_raises_on_unknown_mode(self):
+        with pytest.raises(ValueError, match="Invalid write_mode"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="invalid",
+                data=[["x"]],
+                has_headers=False,
+            )
 
 
 # ==================================================================
@@ -1520,6 +1519,30 @@ class TestCreateSheetIfMissing:
         with pytest.raises(HttpError):
             op.execute(context)
 
+    def test_400_other_error_propagates(self, mock_hook, context):
+        """HTTP 400 without 'already exists' in body should propagate, not be swallowed."""
+        from googleapiclient.errors import HttpError
+        from httplib2 import Response
+
+        mock_hook.get_spreadsheet_metadata.return_value = {
+            "sheets": [{"properties": {"sheetId": 0, "title": "Jan"}}]
+        }
+        mock_hook.create_sheet.side_effect = HttpError(
+            Response({"status": 400}),
+            b"Too many sheets in the spreadsheet",
+        )
+
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Feb",
+            create_sheet_if_missing=True,
+            data=[["col"], [1]],
+            pause_between_batches=0,
+        )
+        with pytest.raises(HttpError):
+            op.execute(context)
+
     def test_default_false_does_not_call_ensure(self, mock_hook, context):
         """With create_sheet_if_missing=False (default), no metadata check."""
         op = GoogleSheetsWriteOperator(
@@ -1879,3 +1902,127 @@ class TestColumnMapping:
         assert written[1] == ["val1", 10]
         assert written[2] == ["val2", 20]
 
+
+# ==================================================================
+# input_format support in _format_rows
+# ==================================================================
+
+
+class TestFormatRowsInputFormat:
+    def test_format_rows_with_input_format(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[],
+            schema={"date": {"type": "date", "input_format": "%Y-%m-%d", "format": "%d.%m.%Y"}},
+        )
+        result = op._format_rows(["date", "value"], [["2026-03-01", "val"]])
+        assert result == [["01.03.2026", "val"]]
+
+    def test_format_rows_without_input_format(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[],
+            schema={"date": {"type": "date", "format": "%d.%m.%Y"}},
+        )
+        result = op._format_rows(["date", "value"], [["01.03.2026", "val"]])
+        assert result == [["01.03.2026", "val"]]
+
+
+class TestMergeInputFormat:
+    """Merge with input_format: no duplicates when incoming keys are ISO, sheet keys are formatted."""
+
+    def _make_op(self, data, schema, **kwargs):
+        defaults = dict(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            schema=schema,
+            batch_size=1000,
+            pause_between_batches=0,
+        )
+        defaults.update(kwargs)
+        return GoogleSheetsWriteOperator(data=data, **defaults)
+
+    def test_merge_no_duplicates_with_input_format(self, mock_hook, context):
+        """Existing key '01.03.2026', incoming key '2026-03-01' → recognized as same → delete + re-append."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["01.03.2026", "old"],
+        ]
+        schema = {"date": {"type": "date", "input_format": "%Y-%m-%d", "format": "%d.%m.%Y"}}
+        incoming = [{"date": "2026-03-01", "value": "new"}]
+        op = self._make_op(incoming, schema=schema)
+        result = op.execute(context)
+
+        # Old row should be deleted (keys matched)
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+
+        # Appended row must use "format" ("%d.%m.%Y"), not raw ISO string
+        appended = mock_hook.append_values.call_args[0][2]
+        assert appended[0][0] == "01.03.2026"
+
+
+# ==================================================================
+# merge_key with duplicate incoming values
+# ==================================================================
+
+
+class TestMergeDuplicateIncomingKeys:
+    """Behaviour when incoming data contains duplicate merge_key values."""
+
+    def test_duplicate_keys_existing_rows_deleted_once_all_incoming_appended(
+        self, mock_hook, context
+    ):
+        """One existing row for key 'A'; two incoming rows for key 'A'.
+        The existing row should be deleted once, and both incoming rows appended."""
+        mock_hook.get_values.return_value = [
+            ["id", "val"],
+            ["A", "old"],
+        ]
+        incoming = [
+            {"id": "A", "val": "v1"},
+            {"id": "A", "val": "v2"},
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=incoming,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        # Existing row deleted once, both incoming rows appended
+        assert result["deleted"] == 1
+        assert result["appended"] == 2
+
+    def test_duplicate_keys_no_existing_rows_all_incoming_appended(
+        self, mock_hook, context
+    ):
+        """Empty sheet; incoming data has duplicate keys — all rows appended."""
+        mock_hook.get_values.return_value = []
+        incoming = [
+            {"id": "A", "val": "v1"},
+            {"id": "A", "val": "v2"},
+            {"id": "B", "val": "v3"},
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=incoming,
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 0
+        assert result["appended"] == 3

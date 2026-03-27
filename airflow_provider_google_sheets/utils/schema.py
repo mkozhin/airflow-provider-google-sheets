@@ -106,7 +106,7 @@ def apply_schema_to_value(value: Any, column_schema: dict, strip_strings: bool =
     if value is None or (isinstance(value, str) and value.strip() == ""):
         return value
 
-    fmt = column_schema.get("format")
+    fmt = column_schema.get("input_format") or column_schema.get("format")
 
     try:
         if col_type == "str":

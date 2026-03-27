@@ -97,6 +97,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         output_path: str | None = None,
         xcom_key: str = "return_value",
         max_xcom_rows: int = 50_000,
+        max_xcom_bytes: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -119,6 +120,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         self.output_path = output_path
         self.xcom_key = xcom_key
         self.max_xcom_rows = max_xcom_rows
+        self.max_xcom_bytes = max_xcom_bytes
 
     # ------------------------------------------------------------------
     # Range helpers
@@ -372,6 +374,21 @@ class GoogleSheetsReadOperator(BaseOperator):
 
         logger.info("Finished reading. Total rows: %d", len(all_rows))
 
-        if headers:
-            return rows_to_dicts(all_rows, headers)
-        return all_rows
+        result = rows_to_dicts(all_rows, headers) if headers else all_rows
+
+        estimated_bytes = len(json.dumps(result, default=str))
+        if estimated_bytes > 5 * 1024 * 1024:
+            logger.warning(
+                "XCom payload is large: ~%d bytes (%d rows). "
+                "Consider using output_type='csv'/'json' for large datasets.",
+                estimated_bytes,
+                len(all_rows),
+            )
+        if self.max_xcom_bytes is not None and estimated_bytes > self.max_xcom_bytes:
+            raise GoogleSheetsDataError(
+                f"Estimated XCom size ({estimated_bytes:,} bytes) exceeds "
+                f"max_xcom_bytes ({self.max_xcom_bytes:,}). "
+                f"Use output_type='csv' or 'json' for large datasets."
+            )
+
+        return result

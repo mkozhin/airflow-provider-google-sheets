@@ -11,11 +11,14 @@ from airflow.models import BaseOperator
 
 from googleapiclient.errors import HttpError
 
+from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
-from airflow_provider_google_sheets.utils.schema import format_row_for_write
+from airflow_provider_google_sheets.utils.schema import apply_schema_to_value, format_row_for_write, format_value_for_write
 
 logger = logging.getLogger(__name__)
+
+_VALID_WRITE_MODES = frozenset({"overwrite", "append", "merge", "smart_merge"})
 
 
 class GoogleSheetsWriteOperator(BaseOperator):
@@ -101,6 +104,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        if write_mode not in _VALID_WRITE_MODES:
+            raise ValueError(
+                f"Invalid write_mode '{write_mode}'. "
+                f"Supported: {sorted(_VALID_WRITE_MODES)}"
+            )
         self.gcp_conn_id = gcp_conn_id
         self.spreadsheet_id = spreadsheet_id
         self.sheet_name = sheet_name
@@ -143,7 +151,30 @@ class GoogleSheetsWriteOperator(BaseOperator):
         """Apply schema formatting to rows if a schema is provided."""
         if not self.schema or not headers:
             return rows
-        return [format_row_for_write(r, headers, self.schema) for r in rows]
+        result = []
+        for row in rows:
+            preprocessed = list(row)
+            for i, value in enumerate(row):
+                if i < len(headers):
+                    col_schema = self.schema.get(headers[i], {})
+                    if col_schema.get("input_format"):
+                        preprocessed[i] = apply_schema_to_value(value, col_schema)
+            result.append(format_row_for_write(preprocessed, headers, self.schema))
+        return result
+
+    def _normalize_sheet_key(self, raw: str) -> str:
+        """Normalize a key value read from the sheet to canonical write format."""
+        key_schema = (self.schema or {}).get(self.merge_key)
+        if not key_schema:
+            return raw
+        # Sheet keys were written using "format" — parse with "format", not "input_format"
+        parse_schema = {k: v for k, v in key_schema.items() if k != "input_format"}
+        try:
+            parsed = apply_schema_to_value(raw, parse_schema)
+            return format_value_for_write(parsed, key_schema)
+        except (ValueError, TypeError, GoogleSheetsDataError):
+            logger.warning("Could not normalize existing key %r via schema, using raw value", raw)
+            return raw
 
     def _apply_partition(
         self, headers: list[str] | None, rows: list[list[Any]]
@@ -192,7 +223,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 hook.create_sheet(spreadsheet_id, sheet_name)
                 logger.info("Created missing sheet '%s'", sheet_name)
             except HttpError as e:
-                if e.resp.status == 400:
+                if e.resp.status == 400 and "already exists" in str(e).lower():
                     # Race condition: another task already created the sheet
                     logger.info(
                         "Sheet '%s' was created by another task (race condition)",
@@ -221,12 +252,12 @@ class GoogleSheetsWriteOperator(BaseOperator):
 
         if self.write_mode == "overwrite":
             return self._execute_overwrite(hook, headers, rows)
-        if self.write_mode == "append":
+        elif self.write_mode == "append":
             return self._execute_append(hook, headers, rows)
-        if self.write_mode in ("merge", "smart_merge"):
+        elif self.write_mode in ("merge", "smart_merge"):
             return self._execute_merge(hook, headers, rows, original_headers=original_headers)
-
-        raise ValueError(f"Unknown write_mode: '{self.write_mode}'")
+        else:
+            raise ValueError(f"Unknown write_mode: '{self.write_mode}'")
 
     # ------------------------------------------------------------------
     # overwrite
@@ -405,7 +436,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
             start_row_num = table_start_row
         for row_num, row in enumerate(data_rows, start=start_row_num):
             if row:
-                key_val = str(row[0])
+                key_val = self._normalize_sheet_key(str(row[0]))
                 existing_index[key_val].append(row_num)
 
         # Step 3 — Group incoming data by key

@@ -157,7 +157,7 @@ read_filtered = GoogleSheetsReadOperator(
     row_stop={"column": "name", "value": "ИТОГО"},
 )
 
-# Skip multiple conditions (OR logic)
+# Skip multiple conditions — row is skipped if ANY condition matches (OR logic)
 read_multi_skip = GoogleSheetsReadOperator(
     task_id="read_multi_skip",
     spreadsheet_id="your-spreadsheet-id",
@@ -165,6 +165,16 @@ read_multi_skip = GoogleSheetsReadOperator(
         {"column": "status", "value": "deleted"},
         {"column": "status", "value": "archived"},
         {"column": "amount", "op": "empty"},
+    ],
+)
+
+# row_stop also accepts a list — stops at the first row matching any condition
+read_stop_multi = GoogleSheetsReadOperator(
+    task_id="read_stop_multi",
+    spreadsheet_id="your-spreadsheet-id",
+    row_stop=[
+        {"column": "name", "value": "ИТОГО"},
+        {"column": "type", "op": "starts_with", "value": "total_"},
     ],
 )
 ```
@@ -185,12 +195,28 @@ read_multi_skip = GoogleSheetsReadOperator(
 | `column_mapping` | dict | `None` | Rename headers using raw names: `{"Original": "new_name"}`. Skips all other processing |
 | `schema` | dict | `None` | Column type schema |
 | `strip_strings` | bool | `False` | Strip leading/trailing whitespace from string cell values |
-| `row_skip` | dict \| list[dict] | `None` | Condition(s) to skip rows: `{"column": "status", "value": "deleted", "op": "equals"}`. Multiple dicts = OR logic |
-| `row_stop` | dict \| list[dict] | `None` | Condition(s) to stop reading: rows from the first match onward are discarded, no further API calls |
+| `row_skip` | dict \| list[dict] | `None` | Skip rows matching a condition. A row is skipped if **any** condition matches (OR). Single dict or list of dicts: `{"column": "status", "value": "deleted", "op": "equals"}` |
+| `row_stop` | dict \| list[dict] | `None` | Stop reading at the first matching row (the matching row is also discarded). Accepts a single dict or list — stops when **any** condition matches. No further API calls after stopping |
 | `chunk_size` | int | `5000` | Rows per API request |
 | `output_type` | str | `"xcom"` | `"xcom"`, `"csv"`, `"json"` (JSON array), or `"jsonl"` (one object per line) |
 | `output_path` | str | `None` | File path for csv/json/jsonl output |
 | `max_xcom_rows` | int | `50000` | Max rows for XCom output |
+| `max_xcom_bytes` | int | `None` | Max XCom payload size in bytes. Raises if exceeded. `None` = no limit (a WARNING is still emitted when the estimated size exceeds 5 MB) |
+
+**Supported `op` values for `row_skip` / `row_stop`:**
+
+| `op` | Description | `value` required |
+|---|---|---|
+| `equals` (default) | Exact string match | yes |
+| `not_equals` | Not equal | yes |
+| `contains` | Cell contains substring | yes |
+| `not_contains` | Cell does not contain substring | yes |
+| `starts_with` | Cell starts with value | yes |
+| `ends_with` | Cell ends with value | yes |
+| `empty` | Cell is empty or None | no |
+| `not_empty` | Cell is not empty | no |
+
+All comparisons are performed on string representations of cell values. If the referenced `column` is not present in the row, the condition is silently ignored (the row is not skipped/stopped on that condition).
 
 ### GoogleSheetsWriteOperator
 
@@ -260,7 +286,7 @@ merge_offset = GoogleSheetsWriteOperator(
 | `batch_size` | int | `1000` | Rows per API request |
 | `pause_between_batches` | float | `1.0` | Seconds between batches |
 | `merge_key` | str | `None` | Key column for merge mode |
-| `table_start` | str | `"A1"` | Top-left cell of the table (e.g. `"C3"`). Used by `append` and `merge` to locate the header and resolve column positions. Defaults to `"A1"` |
+| `table_start` | str | `"A1"` | Top-left cell of the table (e.g. `"C3"`). Used by `append` and `merge` to locate the header and resolve column positions. Ignored in `overwrite` mode — which uses `cell_range` instead |
 | `create_sheet_if_missing` | bool | `False` | When `True`, create the target sheet if it does not exist. Safe to use with parallel tasks — concurrent creation attempts are handled gracefully |
 | `partition_by` | str | `None` | Column name to filter data by before writing. Only rows where the column value matches `partition_value` are written |
 | `partition_value` | str | `None` | Value to match against `partition_by` column. Required when `partition_by` is set |
@@ -431,6 +457,25 @@ Lenient mode also handles:
 - Prefix/suffix stripping: `"1000.4 р."` → `1000.4`, `"10.2%"` → `10.2`
 
 Without `"default"`, the strict behaviour is preserved (error on invalid values).
+
+### Separate parse and write formats for dates (`input_format`)
+
+By default, the `format` field is used both for **parsing** incoming string values and for **writing** to the sheet.
+If your input data uses a different date format than the sheet (e.g. ISO `"2026-03-01"` from JSONL vs `"01.03.2026"` in the sheet), use `input_format` to specify the parse format separately:
+
+```python
+schema = {
+    "date": {
+        "type": "date",
+        "input_format": "%Y-%m-%d",   # how to parse incoming strings (e.g. from JSONL)
+        "format": "%d.%m.%Y",          # how to write to the sheet
+    }
+}
+```
+
+This is especially important in `merge` mode: without `input_format` the incoming key `"2026-03-01"` and the existing sheet key `"01.03.2026"` would not match, causing duplicate rows on every run.
+
+`input_format` only affects `date` and `datetime` columns. For other types (`str`, `int`, etc.) it has no effect.
 
 ## Examples
 

@@ -1,5 +1,13 @@
 # Changelog
 
+
+## v0.8.1
+
+- **Changed:** `GoogleSheetsWriteOperator` now validates `write_mode` in `__init__` — invalid values raise `ValueError` at DAG parse time instead of task execution time
+- **Added:** `max_xcom_bytes` parameter to `GoogleSheetsReadOperator` — optional limit on XCom payload size in bytes (default `None`, backwards compatible). A `WARNING` is also emitted when the estimated payload exceeds 5 MB regardless of the limit
+- **Fixed:** `_ensure_sheet_exists` no longer silently swallows all HTTP 400 errors — only race-condition responses containing `"already exists"` are ignored; other 400 errors (invalid sheet name, too many sheets, etc.) now propagate correctly
+- **Added:** `input_format` field in schema column definition — allows separate parse/write formats for `date`/`datetime` columns. When set, `input_format` is used to parse incoming string values (e.g. ISO `"2026-03-01"`), while `format` controls how values are written to the sheet (e.g. `"01.03.2026"`). Fixes duplicate rows in `merge` mode when input data uses a different date format than the sheet
+
 ## v0.8.0
 
 - **Added:** `GoogleSheetsExtractPartitionsOperator` — extracts unique partition values from data and returns a `list[dict]` for Airflow `expand_kwargs`, enabling fan-out writes where each unique column value maps to its own sheet
