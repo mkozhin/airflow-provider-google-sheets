@@ -64,6 +64,17 @@ class GoogleSheetsReadOperator(BaseOperator):
         output_path: File path for ``csv`` / ``json`` output.
         xcom_key: XCom key used when pushing the result.
         max_xcom_rows: Maximum rows allowed for XCom output.
+        max_xcom_bytes: Maximum XCom payload size in bytes.  ``None`` = no
+            limit (a WARNING is still emitted above 5 MB).
+        filter_column: Include-filter column name.  Must match the
+            **processed** header name — i.e. after transliterate / sanitize /
+            lowercase / column_mapping have been applied.  Must be set
+            together with *filter_value* (both or neither).
+        filter_value: Value(s) to keep.  A single string or a list of
+            strings (OR logic — a row is kept when its *filter_column* value
+            matches **any** entry).  Supports Jinja templating.
+            Compatible with Airflow dynamic mapping:
+            ``ReadOperator.partial(...).expand(filter_value=op.output)``.
     """
 
     template_fields: Sequence[str] = (
@@ -73,6 +84,8 @@ class GoogleSheetsReadOperator(BaseOperator):
         "output_path",
         "row_skip",
         "row_stop",
+        "filter_column",
+        "filter_value",
     )
 
     def __init__(
@@ -98,6 +111,8 @@ class GoogleSheetsReadOperator(BaseOperator):
         xcom_key: str = "return_value",
         max_xcom_rows: int = 50_000,
         max_xcom_bytes: int | None = None,
+        filter_column: str | None = None,
+        filter_value: str | list[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -121,6 +136,8 @@ class GoogleSheetsReadOperator(BaseOperator):
         self.xcom_key = xcom_key
         self.max_xcom_rows = max_xcom_rows
         self.max_xcom_bytes = max_xcom_bytes
+        self.filter_column = filter_column
+        self.filter_value = filter_value
 
     # ------------------------------------------------------------------
     # Range helpers
@@ -172,6 +189,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         headers: list[str] | None,
         row_skip: list[dict] | None = None,
         row_stop: list[dict] | None = None,
+        filter_values_set: set[str] | None = None,
     ) -> Iterator[list[list[Any]]]:
         """Yield rows chunk-by-chunk from the sheet."""
         current_row = data_start_row
@@ -209,6 +227,22 @@ class GoogleSheetsReadOperator(BaseOperator):
                     )
                 ]
 
+            # Apply include filter (filter_column / filter_value)
+            if filter_values_set is not None and headers:
+                if self.filter_column not in headers:
+                    logger.warning(
+                        "filter_column '%s' not found in headers %s",
+                        self.filter_column,
+                        headers,
+                    )
+                    rows = []
+                else:
+                    col_idx = headers.index(self.filter_column)
+                    rows = [
+                        r for r in rows
+                        if (str(r[col_idx]) if col_idx < len(r) else "") in filter_values_set
+                    ]
+
             if rows:
                 yield rows
 
@@ -221,6 +255,10 @@ class GoogleSheetsReadOperator(BaseOperator):
     # ------------------------------------------------------------------
 
     def execute(self, context: Any) -> Any:
+        # Step 0 — early validation
+        if (self.filter_column is None) != (self.filter_value is None):
+            raise ValueError("filter_column and filter_value must both be set or both be None")
+
         hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
 
         headers: list[str] | None = None
@@ -260,14 +298,22 @@ class GoogleSheetsReadOperator(BaseOperator):
         if row_stop:
             validate_conditions(row_stop)
 
+        # Step 2c — normalize filter_column / filter_value
+        filter_values_set: set[str] | None = None
+        if self.filter_column is not None and self.filter_value is not None:
+            vals = self.filter_value if isinstance(self.filter_value, list) else [self.filter_value]
+            filter_values_set = {str(v) for v in vals}
+        elif (self.filter_column is None) != (self.filter_value is None):
+            raise ValueError("filter_column and filter_value must both be set or both be None")
+
         # Step 3 — dispatch by output type
         if self.output_type == "csv":
-            return self._stream_to_csv(hook, headers, data_start_row, row_skip, row_stop)
+            return self._stream_to_csv(hook, headers, data_start_row, row_skip, row_stop, filter_values_set)
         if self.output_type == "json":
-            return self._stream_to_json(hook, headers, data_start_row, row_skip, row_stop)
+            return self._stream_to_json(hook, headers, data_start_row, row_skip, row_stop, filter_values_set)
         if self.output_type == "jsonl":
-            return self._stream_to_jsonl(hook, headers, data_start_row, row_skip, row_stop)
-        return self._read_to_xcom(hook, headers, data_start_row, row_skip, row_stop)
+            return self._stream_to_jsonl(hook, headers, data_start_row, row_skip, row_stop, filter_values_set)
+        return self._read_to_xcom(hook, headers, data_start_row, row_skip, row_stop, filter_values_set)
 
     # ------------------------------------------------------------------
     # Output strategies
@@ -280,6 +326,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         data_start_row: int,
         row_skip: list[dict] | None = None,
         row_stop: list[dict] | None = None,
+        filter_values_set: set[str] | None = None,
     ) -> str:
         if not self.output_path:
             raise ValueError("output_path is required when output_type='csv'")
@@ -289,7 +336,7 @@ class GoogleSheetsReadOperator(BaseOperator):
             writer = csv.writer(f)
             if headers:
                 writer.writerow(headers)
-            for chunk in self._read_chunks(hook, data_start_row, headers, row_skip, row_stop):
+            for chunk in self._read_chunks(hook, data_start_row, headers, row_skip, row_stop, filter_values_set):
                 writer.writerows(chunk)
                 total += len(chunk)
 
@@ -303,6 +350,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         data_start_row: int,
         row_skip: list[dict] | None = None,
         row_stop: list[dict] | None = None,
+        filter_values_set: set[str] | None = None,
     ) -> str:
         if not self.output_path:
             raise ValueError("output_path is required when output_type='json'")
@@ -311,7 +359,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         first = True
         with open(self.output_path, "w", encoding="utf-8") as f:
             f.write("[")
-            for chunk in self._read_chunks(hook, data_start_row, headers, row_skip, row_stop):
+            for chunk in self._read_chunks(hook, data_start_row, headers, row_skip, row_stop, filter_values_set):
                 for row in chunk:
                     if not first:
                         f.write(",")
@@ -335,13 +383,14 @@ class GoogleSheetsReadOperator(BaseOperator):
         data_start_row: int,
         row_skip: list[dict] | None = None,
         row_stop: list[dict] | None = None,
+        filter_values_set: set[str] | None = None,
     ) -> str:
         if not self.output_path:
             raise ValueError("output_path is required when output_type='jsonl'")
 
         total = 0
         with open(self.output_path, "w", encoding="utf-8") as f:
-            for chunk in self._read_chunks(hook, data_start_row, headers, row_skip, row_stop):
+            for chunk in self._read_chunks(hook, data_start_row, headers, row_skip, row_stop, filter_values_set):
                 for row in chunk:
                     if headers:
                         obj = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
@@ -361,9 +410,10 @@ class GoogleSheetsReadOperator(BaseOperator):
         data_start_row: int,
         row_skip: list[dict] | None = None,
         row_stop: list[dict] | None = None,
+        filter_values_set: set[str] | None = None,
     ) -> Any:
         all_rows: list[list[Any]] = []
-        for chunk in self._read_chunks(hook, data_start_row, headers, row_skip, row_stop):
+        for chunk in self._read_chunks(hook, data_start_row, headers, row_skip, row_stop, filter_values_set):
             all_rows.extend(chunk)
             if len(all_rows) > self.max_xcom_rows:
                 raise GoogleSheetsDataError(

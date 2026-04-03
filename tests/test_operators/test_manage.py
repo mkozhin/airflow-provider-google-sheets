@@ -16,6 +16,7 @@ from airflow_provider_google_sheets.operators.manage import (
     GoogleSheetsCreateSpreadsheetOperator,
     GoogleSheetsExtractPartitionsOperator,
     GoogleSheetsListSheetsOperator,
+    GoogleSheetsUniqueValuesOperator,
 )
 
 
@@ -502,3 +503,112 @@ class TestExtractPartitions:
         )
         with pytest.raises(ValueError, match="No data provided"):
             op.execute(context)
+
+
+# ------------------------------------------------------------------
+# UniqueValuesOperator
+# ------------------------------------------------------------------
+
+
+class TestUniqueValuesOperator:
+    def test_basic_unique_values_in_order(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city", "value"]],                                           # headers
+            [["Moscow", "10"], ["Berlin", "20"], ["Moscow", "30"], ["Paris", "40"]],  # data
+            [],
+        ]
+        op = GoogleSheetsUniqueValuesOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            column="city",
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+        )
+        result = op.execute(context)
+        assert result == ["Moscow", "Berlin", "Paris"]
+
+    def test_exclude_values(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city"]],
+            [["Moscow"], ["Berlin"], ["Paris"], ["Moscow"]],
+            [],
+        ]
+        op = GoogleSheetsUniqueValuesOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            column="city",
+            exclude_values=["Berlin"],
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+        )
+        result = op.execute(context)
+        assert result == ["Moscow", "Paris"]
+
+    def test_exclude_empty_string(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city"]],
+            [["Moscow"], [""], ["Berlin"], [""]],
+            [],
+        ]
+        op = GoogleSheetsUniqueValuesOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            column="city",
+            exclude_values=[""],
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+        )
+        result = op.execute(context)
+        assert result == ["Moscow", "Berlin"]
+
+    def test_column_not_found_raises(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city", "value"]],
+        ]
+        op = GoogleSheetsUniqueValuesOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            column="nonexistent",
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+        )
+        with pytest.raises(ValueError, match="Column 'nonexistent' not found"):
+            op.execute(context)
+
+    def test_column_with_column_mapping(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["Город", "Значение"]],
+            [["Москва", "10"], ["Берлин", "20"], ["Москва", "30"]],
+            [],
+        ]
+        op = GoogleSheetsUniqueValuesOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            column="city",
+            column_mapping={"Город": "city", "Значение": "value"},
+        )
+        result = op.execute(context)
+        assert result == ["Москва", "Берлин"]
+
+    def test_duplicates_across_chunks_excluded(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city"]],
+            [["Moscow"], ["Berlin"]],   # chunk 1 (chunk_size=2)
+            [["Moscow"], ["Paris"]],    # chunk 2
+            [],
+        ]
+        op = GoogleSheetsUniqueValuesOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            column="city",
+            chunk_size=2,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+        )
+        result = op.execute(context)
+        assert result == ["Moscow", "Berlin", "Paris"]

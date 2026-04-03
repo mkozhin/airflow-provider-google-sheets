@@ -177,6 +177,41 @@ read_stop_multi = GoogleSheetsReadOperator(
         {"column": "type", "op": "starts_with", "value": "total_"},
     ],
 )
+
+# Filter rows by a single column value (include-filter)
+# filter_column must be the PROCESSED header name (after transliterate/sanitize/lowercase/column_mapping)
+read_city = GoogleSheetsReadOperator(
+    task_id="read_moscow",
+    spreadsheet_id="your-spreadsheet-id",
+    filter_column="city",
+    filter_value="Moscow",
+)
+
+# Filter by multiple values (OR logic)
+read_cities = GoogleSheetsReadOperator(
+    task_id="read_two_cities",
+    spreadsheet_id="your-spreadsheet-id",
+    filter_column="city",
+    filter_value=["Moscow", "Berlin"],
+)
+
+# Dynamic fan-out: read data for each city in separate mapped tasks
+# "Город" in the spreadsheet + column_mapping → filter_column="city"
+from airflow_provider_google_sheets.operators.manage import GoogleSheetsUniqueValuesOperator
+
+cities = GoogleSheetsUniqueValuesOperator(
+    task_id="get_cities",
+    spreadsheet_id="your-spreadsheet-id",
+    column="city",
+    column_mapping={"Город": "city"},
+    exclude_values=[""],   # skip empty cells
+)
+read_by_city = GoogleSheetsReadOperator.partial(
+    task_id="read_by_city",
+    spreadsheet_id="your-spreadsheet-id",
+    column_mapping={"Город": "city"},
+    filter_column="city",
+).expand(filter_value=cities.output)
 ```
 
 **Parameters:**
@@ -202,6 +237,8 @@ read_stop_multi = GoogleSheetsReadOperator(
 | `output_path` | str | `None` | File path for csv/json/jsonl output |
 | `max_xcom_rows` | int | `50000` | Max rows for XCom output |
 | `max_xcom_bytes` | int | `None` | Max XCom payload size in bytes. Raises if exceeded. `None` = no limit (a WARNING is still emitted when the estimated size exceeds 5 MB) |
+| `filter_column` | str | `None` | Include-filter column name (processed header name). Must be set together with `filter_value` |
+| `filter_value` | str \| list[str] | `None` | Value(s) to keep. OR logic when a list is given. Supports Jinja templates and dynamic mapping via `expand(filter_value=...)` |
 
 **Supported `op` values for `row_skip` / `row_stop`:**
 
@@ -423,6 +460,60 @@ write = GoogleSheetsWriteOperator.partial(
     {"sheet_name": "Report 2026-02", "partition_value": "2026-02"},
 ]
 ```
+
+### GoogleSheetsUniqueValuesOperator
+
+Read unique values from a single column of a Google Sheets spreadsheet and return a `list[str]` in order of first occurrence. Designed for Airflow dynamic task mapping — unlike `ExtractPartitionsOperator`, it reads directly from the API instead of working on in-memory data.
+
+The `column` parameter must be the **processed** header name (after transliterate / sanitize / lowercase / column_mapping — same processing as `GoogleSheetsReadOperator`).
+
+```python
+from airflow_provider_google_sheets.operators.manage import GoogleSheetsUniqueValuesOperator
+from airflow_provider_google_sheets.operators.read import GoogleSheetsReadOperator
+
+# Get unique city values from the sheet
+cities = GoogleSheetsUniqueValuesOperator(
+    task_id="get_cities",
+    spreadsheet_id="your-spreadsheet-id",
+    column="city",           # processed header name
+    exclude_values=[""],     # skip empty cells
+)
+
+# Fan-out: read data filtered by each city in parallel mapped tasks
+read_by_city = GoogleSheetsReadOperator.partial(
+    task_id="read_by_city",
+    spreadsheet_id="your-spreadsheet-id",
+    filter_column="city",
+).expand(filter_value=cities.output)
+
+# With column_mapping — "Город" in the sheet → "city" after mapping
+cities_mapped = GoogleSheetsUniqueValuesOperator(
+    task_id="get_cities",
+    spreadsheet_id="your-spreadsheet-id",
+    column="city",                          # name AFTER mapping
+    column_mapping={"Город": "city"},
+    exclude_values=[""],
+)
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `gcp_conn_id` | str | `"google_cloud_default"` | Airflow Connection ID |
+| `spreadsheet_id` | str | — | Spreadsheet ID |
+| `sheet_name` | str | `None` | Sheet name (None = first sheet) |
+| `cell_range` | str | `None` | A1-notation range (None = entire sheet) |
+| `column` | str | — | Processed header name of the column to extract unique values from |
+| `exclude_values` | list[str] | `None` | Values to exclude. Pass `[""]` to exclude empty cells |
+| `chunk_size` | int | `5000` | Rows per API request |
+| `has_headers` | bool | `True` | First row contains headers |
+| `transliterate_headers` | bool | `True` | Transliterate Cyrillic to Latin |
+| `sanitize_headers` | bool | `True` | Remove spaces and special characters |
+| `lowercase_headers` | bool | `True` | Convert headers to lowercase |
+| `column_mapping` | dict | `None` | Rename headers using raw names. Skips all other processing |
+
+**Returns:** `list[str]` — unique values in order of first occurrence.
 
 ## Schema
 

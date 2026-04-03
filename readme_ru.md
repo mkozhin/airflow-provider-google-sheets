@@ -178,6 +178,42 @@ read_stop_multi = GoogleSheetsReadOperator(
         {"column": "type", "op": "starts_with", "value": "total_"},
     ],
 )
+
+# Фильтрация строк по значению столбца (include-фильтр)
+# filter_column указывается по ОБРАБОТАННОМУ имени заголовка
+# (после transliterate/sanitize/lowercase/column_mapping)
+read_city = GoogleSheetsReadOperator(
+    task_id="read_moscow",
+    spreadsheet_id="your-spreadsheet-id",
+    filter_column="city",
+    filter_value="Moscow",
+)
+
+# Фильтрация по нескольким значениям (OR-логика)
+read_cities = GoogleSheetsReadOperator(
+    task_id="read_two_cities",
+    spreadsheet_id="your-spreadsheet-id",
+    filter_column="city",
+    filter_value=["Moscow", "Berlin"],
+)
+
+# Динамический fan-out: чтение данных по каждому городу в отдельных mapped tasks
+# "Город" в таблице + column_mapping → filter_column="city"
+from airflow_provider_google_sheets.operators.manage import GoogleSheetsUniqueValuesOperator
+
+cities = GoogleSheetsUniqueValuesOperator(
+    task_id="get_cities",
+    spreadsheet_id="your-spreadsheet-id",
+    column="city",
+    column_mapping={"Город": "city"},
+    exclude_values=[""],   # исключить пустые ячейки
+)
+read_by_city = GoogleSheetsReadOperator.partial(
+    task_id="read_by_city",
+    spreadsheet_id="your-spreadsheet-id",
+    column_mapping={"Город": "city"},
+    filter_column="city",
+).expand(filter_value=cities.output)
 ```
 
 **Параметры:**
@@ -203,6 +239,8 @@ read_stop_multi = GoogleSheetsReadOperator(
 | `output_path` | str | `None` | Путь к файлу для csv/json/jsonl |
 | `max_xcom_rows` | int | `50000` | Максимум строк для XCom |
 | `max_xcom_bytes` | int | `None` | Максимальный размер XCom-payload в байтах. Вызывает ошибку при превышении. `None` = без ограничения (WARNING всё равно выводится при >5 МБ) |
+| `filter_column` | str | `None` | Имя столбца для include-фильтра (обработанное имя заголовка). Указывается вместе с `filter_value` |
+| `filter_value` | str \| list[str] | `None` | Значение(я) для включения. OR-логика при списке. Поддерживает Jinja-шаблоны и динамический маппинг через `expand(filter_value=...)` |
 
 **Поддерживаемые значения `op` для `row_skip` / `row_stop`:**
 
@@ -424,6 +462,60 @@ write = GoogleSheetsWriteOperator.partial(
     {"sheet_name": "Отчёт 2026-02", "partition_value": "2026-02"},
 ]
 ```
+
+### GoogleSheetsUniqueValuesOperator
+
+Читает уникальные значения одного столбца из Google Sheets и возвращает `list[str]` в порядке первого вхождения. Предназначен для динамического маппинга тасков в Airflow — в отличие от `ExtractPartitionsOperator`, обращается к API напрямую (не работает с данными в памяти).
+
+Параметр `column` указывается по **обработанному** имени заголовка (после transliterate / sanitize / lowercase / column_mapping — такая же обработка, как в `GoogleSheetsReadOperator`).
+
+```python
+from airflow_provider_google_sheets.operators.manage import GoogleSheetsUniqueValuesOperator
+from airflow_provider_google_sheets.operators.read import GoogleSheetsReadOperator
+
+# Получить уникальные значения столбца "city" из таблицы
+cities = GoogleSheetsUniqueValuesOperator(
+    task_id="get_cities",
+    spreadsheet_id="your-spreadsheet-id",
+    column="city",           # обработанное имя заголовка
+    exclude_values=[""],     # исключить пустые ячейки
+)
+
+# Fan-out: чтение данных по каждому городу в параллельных mapped tasks
+read_by_city = GoogleSheetsReadOperator.partial(
+    task_id="read_by_city",
+    spreadsheet_id="your-spreadsheet-id",
+    filter_column="city",
+).expand(filter_value=cities.output)
+
+# С column_mapping — "Город" в таблице → "city" после маппинга
+cities_mapped = GoogleSheetsUniqueValuesOperator(
+    task_id="get_cities",
+    spreadsheet_id="your-spreadsheet-id",
+    column="city",                          # имя ПОСЛЕ маппинга
+    column_mapping={"Город": "city"},
+    exclude_values=[""],
+)
+```
+
+**Параметры:**
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `gcp_conn_id` | str | `"google_cloud_default"` | ID подключения Airflow |
+| `spreadsheet_id` | str | — | ID таблицы |
+| `sheet_name` | str | `None` | Имя листа (None = первый лист) |
+| `cell_range` | str | `None` | Диапазон в формате A1 (None = весь лист) |
+| `column` | str | — | Обработанное имя заголовка столбца для извлечения уникальных значений |
+| `exclude_values` | list[str] | `None` | Значения для исключения. Передайте `[""]` чтобы исключить пустые ячейки |
+| `chunk_size` | int | `5000` | Строк за один API-запрос |
+| `has_headers` | bool | `True` | Первая строка содержит заголовки |
+| `transliterate_headers` | bool | `True` | Транслитерировать кириллицу в латиницу |
+| `sanitize_headers` | bool | `True` | Удалить пробелы и спецсимволы |
+| `lowercase_headers` | bool | `True` | Привести заголовки к нижнему регистру |
+| `column_mapping` | dict | `None` | Переименование по оригинальным именам. Пропускает всю остальную обработку |
+
+**Возвращает:** `list[str]` — уникальные значения в порядке первого вхождения.
 
 ## Схема
 

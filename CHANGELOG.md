@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.9.0
+
+- **Added:** `filter_column` and `filter_value` parameters to `GoogleSheetsReadOperator` — include-filter that keeps only rows where the specified column matches the given value(s). OR logic when a list is provided. Both parameters support Jinja templating and dynamic task mapping via `expand(filter_value=...)`. `filter_column` must reference the **processed** header name (after transliterate/sanitize/lowercase/column_mapping)
+- **Added:** `GoogleSheetsUniqueValuesOperator` — reads unique values from a single column directly from the Google Sheets API (chunk by chunk) and returns `list[str]` in order of first occurrence. Supports `exclude_values`, `column_mapping`, and the same header processing options as `GoogleSheetsReadOperator`. Designed for fan-out dynamic mapping: `ReadOperator.partial(...).expand(filter_value=unique_values_op.output)`
+
 ## v0.8.1
 
 - **Changed:** `GoogleSheetsWriteOperator` now validates `write_mode` in `__init__` — invalid values raise `ValueError` at DAG parse time instead of task execution time

@@ -1064,3 +1064,166 @@ class TestRowStopMultipleConditions:
         result = op.execute(context)
 
         assert result == [{"name": "Item1", "type": "data"}]
+
+
+# ------------------------------------------------------------------
+# filter_column / filter_value
+# ------------------------------------------------------------------
+
+
+class TestFilterColumn:
+    def test_single_value_filters_rows(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city", "value"]],
+            [["Moscow", "10"], ["Berlin", "20"], ["Moscow", "30"]],
+            [],
+        ]
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+            filter_column="city",
+            filter_value="Moscow",
+        )
+        result = op.execute(context)
+        assert result == [{"city": "Moscow", "value": "10"}, {"city": "Moscow", "value": "30"}]
+
+    def test_list_of_values_or_logic(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city", "value"]],
+            [["Moscow", "10"], ["Berlin", "20"], ["Paris", "30"], ["London", "40"]],
+            [],
+        ]
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+            filter_column="city",
+            filter_value=["Moscow", "Berlin"],
+        )
+        result = op.execute(context)
+        assert result == [{"city": "Moscow", "value": "10"}, {"city": "Berlin", "value": "20"}]
+
+    def test_filter_column_without_filter_value_raises(self, context):
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            filter_column="city",
+            filter_value=None,
+        )
+        with pytest.raises(ValueError, match="filter_column and filter_value must both be set"):
+            op.execute(context)
+
+    def test_filter_value_without_filter_column_raises(self, context):
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            filter_column=None,
+            filter_value="Moscow",
+        )
+        with pytest.raises(ValueError, match="filter_column and filter_value must both be set"):
+            op.execute(context)
+
+    def test_filter_column_not_in_headers_returns_empty(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city", "value"]],
+            [["Moscow", "10"]],
+            [],
+        ]
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+            filter_column="nonexistent",
+            filter_value="Moscow",
+        )
+        result = op.execute(context)
+        assert result == []
+
+    def test_filter_column_with_column_mapping(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["Город", "Значение"]],
+            [["Москва", "10"], ["Берлин", "20"], ["Москва", "30"]],
+            [],
+        ]
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            column_mapping={"Город": "city", "Значение": "value"},
+            filter_column="city",
+            filter_value="Москва",
+        )
+        result = op.execute(context)
+        assert result == [{"city": "Москва", "value": "10"}, {"city": "Москва", "value": "30"}]
+
+    def test_filter_with_row_skip(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city", "skip_me"]],
+            [["Moscow", "no"], ["Moscow", "yes"], ["Berlin", "no"]],
+            [],
+        ]
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+            filter_column="city",
+            filter_value="Moscow",
+            row_skip={"column": "skip_me", "value": "yes"},
+        )
+        result = op.execute(context)
+        # row_skip removes {"city":"Moscow","skip_me":"yes"}, filter keeps only Moscow
+        assert result == [{"city": "Moscow", "skip_me": "no"}]
+
+    def test_filter_with_row_stop(self, mock_hook, context):
+        mock_hook.get_values.side_effect = [
+            [["city", "marker"]],
+            [["Moscow", "data"], ["STOP", "stop"], ["Moscow", "data2"]],
+            [],
+        ]
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+            filter_column="city",
+            filter_value="Moscow",
+            row_stop={"column": "city", "value": "STOP"},
+        )
+        result = op.execute(context)
+        # row_stop truncates at STOP row (exclusive), then filter keeps only Moscow
+        assert result == [{"city": "Moscow", "marker": "data"}]
+
+    def test_filter_with_csv_output(self, mock_hook, context, tmp_dir):
+        mock_hook.get_values.side_effect = [
+            [["city", "value"]],
+            [["Moscow", "10"], ["Berlin", "20"], ["Moscow", "30"]],
+            [],
+        ]
+        output_path = os.path.join(tmp_dir, "out.csv")
+        op = GoogleSheetsReadOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            transliterate_headers=False,
+            sanitize_headers=False,
+            lowercase_headers=False,
+            output_type="csv",
+            output_path=output_path,
+            filter_column="city",
+            filter_value="Moscow",
+        )
+        op.execute(context)
+        with open(output_path) as f:
+            lines = f.read().splitlines()
+        assert lines[0] == "city,value"
+        assert lines[1] == "Moscow,10"
+        assert lines[2] == "Moscow,30"
+        assert len(lines) == 3
