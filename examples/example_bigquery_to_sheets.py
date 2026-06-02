@@ -25,6 +25,7 @@ BQ_PROJECT = "your-gcp-project"
 BQ_DATASET = "your_dataset"
 BQ_TABLE = "your_table"
 GCS_BUCKET = "your-temp-bucket"
+GCS_EXPORT_OBJECT = "tmp/bq_export.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +71,13 @@ def bq_to_sheets_overwrite_small():
             f"SELECT * FROM `{BQ_PROJECT}.{BQ_DATASET}.tmp_sheets_export`"
         )
         columns = ["date", "region", "revenue", "quantity"]
-        return [dict(zip(columns, row)) for row in records]
+        # BigQueryHook.get_records() returns Python date/datetime objects for
+        # DATE/TIMESTAMP columns; convert to strings so the Sheets API can
+        # serialize them.
+        return [
+            {k: str(v) if hasattr(v, "isoformat") else v for k, v in dict(zip(columns, row)).items()}
+            for row in records
+        ]
 
     write_sheets = GoogleSheetsWriteOperator(
         task_id="write_to_sheets",
@@ -100,26 +107,32 @@ bq_to_sheets_overwrite_small()
     tags=["google-sheets", "bigquery", "example"],
 )
 def bq_to_sheets_overwrite_large():
-    # Export BigQuery table to CSV in GCS
+    # Export BigQuery table to CSV in GCS.
+    # NOTE: BigQuery splits the export into multiple sharded files for tables
+    # larger than ~1 GB.  This single-file pattern works reliably only when
+    # the exported data fits in one file.  For larger tables use a wildcard URI
+    # (e.g. "tmp/bq_export_*.csv") and download all resulting files.
     export_to_gcs = BigQueryToGCSOperator(
         task_id="export_to_gcs",
         gcp_conn_id=GCP_CONN_ID,
         source_project_dataset_table=f"{BQ_PROJECT}.{BQ_DATASET}.{BQ_TABLE}",
-        destination_cloud_storage_uris=[f"gs://{GCS_BUCKET}/tmp/bq_export.csv"],
+        destination_cloud_storage_uris=[f"gs://{GCS_BUCKET}/{GCS_EXPORT_OBJECT}"],
         export_format="CSV",
         print_header=True,
     )
 
     @task
-    def download_csv(**context):
+    def download_csv(gcs_object: str, **context):
         """Download CSV from GCS to local filesystem."""
+        import os
+
         from airflow.providers.google.cloud.hooks.gcs import GCSHook
 
         hook = GCSHook(gcp_conn_id=GCP_CONN_ID)
-        local_path = "/tmp/bq_export.csv"
+        local_path = f"/tmp/{os.path.basename(gcs_object)}"
         hook.download(
             bucket_name=GCS_BUCKET,
-            object_name="tmp/bq_export.csv",
+            object_name=gcs_object,
             filename=local_path,
         )
         return local_path
@@ -137,7 +150,7 @@ def bq_to_sheets_overwrite_large():
         pause_between_batches=2.0,
     )
 
-    export_to_gcs >> download_csv() >> write_large
+    export_to_gcs >> download_csv(gcs_object=GCS_EXPORT_OBJECT) >> write_large
 
 
 bq_to_sheets_overwrite_large()
@@ -167,7 +180,13 @@ def bq_to_sheets_smart_merge():
             ORDER BY date
         """)
         columns = ["date", "region", "revenue", "quantity"]
-        return [dict(zip(columns, row)) for row in records]
+        # BigQueryHook.get_records() returns Python date/datetime objects for
+        # DATE/TIMESTAMP columns; convert to strings so the Sheets API can
+        # serialize them.
+        return [
+            {k: str(v) if hasattr(v, "isoformat") else v for k, v in dict(zip(columns, row)).items()}
+            for row in records
+        ]
 
     # Smart merge: existing rows with matching date are updated,
     # new dates are appended, dates removed from BQ are deleted from Sheets
