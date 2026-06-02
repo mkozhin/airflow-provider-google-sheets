@@ -35,6 +35,7 @@ SQL_QUERY = f"""
 """
 
 FETCH_CHUNK_SIZE = 5000
+OUTPUT_FILE = "/tmp/bq_query_result.json"
 
 
 @dag(
@@ -48,7 +49,7 @@ def bq_query_to_sheets():
 
     # Step 1 — run query and stream results to local JSONL file
     @task
-    def run_query_to_json() -> str:
+    def run_query_to_json(output_path: str) -> str:
         """Execute SQL query and stream results to a local JSONL file.
 
         Uses cursor.fetchmany() to read data in chunks.  Only one chunk
@@ -71,10 +72,9 @@ def bq_query_to_sheets():
         cursor.execute(SQL_QUERY)
 
         columns = [desc[0] for desc in cursor.description]
-        local_path = "/tmp/bq_query_result.json"
         row_count = 0
 
-        with open(local_path, "w", encoding="utf-8") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             while True:
                 chunk = cursor.fetchmany(FETCH_CHUNK_SIZE)
                 if not chunk:
@@ -89,8 +89,8 @@ def bq_query_to_sheets():
                     f.write("\n")
                 row_count += len(chunk)
 
-        log.info("Wrote %d rows (%d columns) to %s", row_count, len(columns), local_path)
-        return local_path
+        log.info("Wrote %d rows (%d columns) to %s", row_count, len(columns), output_path)
+        return output_path
 
     # Step 2 — write JSON file to Google Sheets
     write_to_sheets = GoogleSheetsWriteOperator(
@@ -104,7 +104,7 @@ def bq_query_to_sheets():
         pause_between_batches=1.0,
     )
 
-    run_query_to_json() >> write_to_sheets
+    run_query_to_json(output_path=OUTPUT_FILE) >> write_to_sheets
 
 
 bq_query_to_sheets()
