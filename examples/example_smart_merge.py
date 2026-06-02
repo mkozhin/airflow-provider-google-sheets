@@ -141,8 +141,12 @@ sheets_smart_merge_combined()
     tags=["google-sheets", "example", "smart-merge"],
 )
 def sheets_smart_merge_no_headers():
-    # When has_headers=False, row 1 is treated as data (not header).
-    # merge_key still references the column name from the incoming data headers.
+    # Use this when the sheet has no header row — all rows are treated as data.
+    # merge_key references the key in the incoming list[dict] (the operator uses
+    # dict keys as virtual headers to locate the key column).
+    # write_headers=False is required: otherwise on the first run the operator
+    # would write headers into row 1, and on subsequent runs that header row
+    # would be treated as a data row (breaking the merge).
     GoogleSheetsWriteOperator(
         task_id="merge_no_headers",
         gcp_conn_id=GCP_CONN_ID,
@@ -151,6 +155,7 @@ def sheets_smart_merge_no_headers():
         write_mode="smart_merge",
         merge_key="key",
         has_headers=False,
+        write_headers=False,
         data=[
             {"key": "X", "value": 100},
             {"key": "Y", "value": 200},
