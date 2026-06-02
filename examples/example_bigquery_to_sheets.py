@@ -188,8 +188,9 @@ def bq_to_sheets_smart_merge():
             for row in records
         ]
 
-    # Smart merge: existing rows with matching date are updated,
-    # new dates are appended, dates removed from BQ are deleted from Sheets
+    # Smart merge: existing rows with matching date are replaced,
+    # new dates are appended.  Rows for dates outside the query window are
+    # left untouched in Sheets.
     merge_to_sheets = GoogleSheetsWriteOperator(
         task_id="smart_merge_to_sheets",
         gcp_conn_id=GCP_CONN_ID,
