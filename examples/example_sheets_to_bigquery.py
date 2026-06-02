@@ -164,13 +164,16 @@ sheets_to_bq_append()
 )
 def sheets_to_bq_date_update():
     # Read to XCom — needed to compute the date range for the DELETE query.
+    # Dates are kept as strings (type "str") intentionally: Google Sheets
+    # already stores them in ISO format, and datetime.date objects are not
+    # safely serializable by all Airflow XCom backends.
     read_data = GoogleSheetsReadOperator(
         task_id="read_sheets_data",
         gcp_conn_id=GCP_CONN_ID,
         spreadsheet_id=SPREADSHEET_ID,
         sheet_name="DailyMetrics",
         schema={
-            "date": {"type": "date", "format": "%Y-%m-%d"},
+            "date": {"type": "str"},
             "metric": {"type": "str"},
             "value": {"type": "float"},
         },
