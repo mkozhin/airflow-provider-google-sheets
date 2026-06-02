@@ -182,6 +182,12 @@ sheets_read_transform_write()
     tags=["google-sheets", "example"],
 )
 def sheets_write_schema():
+    # schema on write controls how Python values are formatted before writing
+    # to the cell.  For date columns that arrive as strings, input_format tells
+    # the operator how to parse the string first; format controls the output
+    # representation written to the cell.
+    # Without input_format, string dates pass through unchanged (str() is applied
+    # but no strftime conversion happens because they're not datetime objects).
     GoogleSheetsWriteOperator(
         task_id="write_with_schema",
         gcp_conn_id=GCP_CONN_ID,
@@ -189,7 +195,7 @@ def sheets_write_schema():
         sheet_name="Formatted",
         write_mode="overwrite",
         schema={
-            "date": {"type": "date", "format": "%d.%m.%Y"},
+            "date": {"type": "date", "input_format": "%Y-%m-%d", "format": "%d.%m.%Y"},
             "amount": {"type": "float"},
             "is_paid": {"type": "bool"},
         },
