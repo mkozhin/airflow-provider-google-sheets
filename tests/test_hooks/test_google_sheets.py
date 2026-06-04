@@ -272,3 +272,44 @@ class TestTrimSheet:
         hook.trim_sheet(SPREADSHEET_ID, SHEET_NAME, keep_rows=10)
 
         mock_service.spreadsheets().batchUpdate.assert_not_called()
+
+
+class TestRequestTimeout:
+    def _build_hook(self, mock_connection, timeout):
+        with patch.object(GoogleSheetsHook, "get_connection", return_value=mock_connection), \
+             patch("airflow_provider_google_sheets.hooks.google_sheets.Credentials") as mock_creds, \
+             patch("airflow_provider_google_sheets.hooks.google_sheets.httplib2.Http") as mock_http_cls, \
+             patch("airflow_provider_google_sheets.hooks.google_sheets.AuthorizedHttp") as mock_auth_cls, \
+             patch("airflow_provider_google_sheets.hooks.google_sheets.build") as mock_build:
+            mock_creds.from_service_account_info.return_value = MagicMock()
+            mock_http_cls.return_value = MagicMock()
+            mock_auth_cls.return_value = MagicMock()
+            mock_build.return_value = MagicMock()
+            hook = GoogleSheetsHook(gcp_conn_id="test_conn", request_timeout=timeout)
+            hook.get_conn()
+            return mock_http_cls, mock_auth_cls, mock_build
+
+    def test_default_timeout_creates_authorized_http(self, mock_connection):
+        mock_http_cls, mock_auth_cls, mock_build = self._build_hook(mock_connection, 300)
+
+        mock_http_cls.assert_called_once_with(timeout=300)
+        mock_auth_cls.assert_called_once()
+        call_kwargs = mock_build.call_args[1]
+        assert "http" in call_kwargs
+        assert "credentials" not in call_kwargs
+
+    def test_custom_timeout_passed_to_httplib2(self, mock_connection):
+        mock_http_cls, mock_auth_cls, mock_build = self._build_hook(mock_connection, 600)
+
+        mock_http_cls.assert_called_once_with(timeout=600)
+        call_kwargs = mock_build.call_args[1]
+        assert "http" in call_kwargs
+
+    def test_none_timeout_uses_legacy_credentials_path(self, mock_connection):
+        mock_http_cls, mock_auth_cls, mock_build = self._build_hook(mock_connection, None)
+
+        mock_http_cls.assert_not_called()
+        mock_auth_cls.assert_not_called()
+        call_kwargs = mock_build.call_args[1]
+        assert "credentials" in call_kwargs
+        assert "http" not in call_kwargs

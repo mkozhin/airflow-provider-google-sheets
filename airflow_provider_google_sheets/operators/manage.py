@@ -25,6 +25,8 @@ class GoogleSheetsCreateSpreadsheetOperator(BaseOperator):
         title: Spreadsheet title.
         sheet_titles: Optional list of sheet (tab) names.  When *None* the
             spreadsheet is created with a single default sheet.
+        request_timeout: Per-request HTTP timeout in seconds.  Overrides the
+            Airflow socket timeout.  ``None`` inherits the Airflow default.
     """
 
     template_fields: Sequence[str] = ("title", "sheet_titles")
@@ -35,15 +37,17 @@ class GoogleSheetsCreateSpreadsheetOperator(BaseOperator):
         gcp_conn_id: str = "google_cloud_default",
         title: str,
         sheet_titles: list[str] | None = None,
+        request_timeout: int | None = 300,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.gcp_conn_id = gcp_conn_id
         self.title = title
         self.sheet_titles = sheet_titles
+        self.request_timeout = request_timeout
 
     def execute(self, context: Any) -> str:
-        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
+        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id, request_timeout=self.request_timeout)
         spreadsheet_id = hook.create_spreadsheet(
             title=self.title,
             sheet_titles=self.sheet_titles,
@@ -64,6 +68,8 @@ class GoogleSheetsCreateSheetOperator(BaseOperator):
         gcp_conn_id: Airflow Connection ID.
         spreadsheet_id: Target spreadsheet ID.
         sheet_title: Name of the new sheet.
+        request_timeout: Per-request HTTP timeout in seconds.  Overrides the
+            Airflow socket timeout.  ``None`` inherits the Airflow default.
     """
 
     template_fields: Sequence[str] = ("spreadsheet_id", "sheet_title")
@@ -74,15 +80,17 @@ class GoogleSheetsCreateSheetOperator(BaseOperator):
         gcp_conn_id: str = "google_cloud_default",
         spreadsheet_id: str,
         sheet_title: str,
+        request_timeout: int | None = 300,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.gcp_conn_id = gcp_conn_id
         self.spreadsheet_id = spreadsheet_id
         self.sheet_title = sheet_title
+        self.request_timeout = request_timeout
 
     def execute(self, context: Any) -> dict:
-        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
+        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id, request_timeout=self.request_timeout)
         result = hook.create_sheet(
             spreadsheet_id=self.spreadsheet_id,
             title=self.sheet_title,
@@ -108,6 +116,8 @@ class GoogleSheetsListSheetsOperator(BaseOperator):
         exclude_pattern: Regex to exclude sheets by name (``re.search``).
         index_range: ``(start, end)`` slice by sheet position (0-based,
             start inclusive, end exclusive).
+        request_timeout: Per-request HTTP timeout in seconds.  Overrides the
+            Airflow socket timeout.  ``None`` inherits the Airflow default.
     """
 
     template_fields: Sequence[str] = ("spreadsheet_id", "name_pattern", "exclude_pattern")
@@ -120,6 +130,7 @@ class GoogleSheetsListSheetsOperator(BaseOperator):
         name_pattern: str | None = None,
         exclude_pattern: str | None = None,
         index_range: tuple[int, int] | None = None,
+        request_timeout: int | None = 300,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -128,9 +139,10 @@ class GoogleSheetsListSheetsOperator(BaseOperator):
         self.name_pattern = name_pattern
         self.exclude_pattern = exclude_pattern
         self.index_range = index_range
+        self.request_timeout = request_timeout
 
     def execute(self, context: Any) -> list[str]:
-        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
+        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id, request_timeout=self.request_timeout)
         meta = hook.get_spreadsheet_metadata(self.spreadsheet_id)
         sheets = [s["properties"]["title"] for s in meta.get("sheets", [])]
 
@@ -295,6 +307,8 @@ class GoogleSheetsUniqueValuesOperator(BaseOperator):
         column_mapping: Optional dict mapping raw header names to new names.
             When provided, mapping is applied directly to raw headers (other
             processing options are skipped).
+        request_timeout: Per-request HTTP timeout in seconds.  Overrides the
+            Airflow socket timeout.  ``None`` inherits the Airflow default.
     """
 
     template_fields: Sequence[str] = ("spreadsheet_id", "sheet_name", "cell_range", "column")
@@ -314,6 +328,7 @@ class GoogleSheetsUniqueValuesOperator(BaseOperator):
         sanitize_headers: bool = True,
         lowercase_headers: bool = True,
         column_mapping: dict[str, str] | None = None,
+        request_timeout: int | None = 300,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -329,6 +344,7 @@ class GoogleSheetsUniqueValuesOperator(BaseOperator):
         self.sanitize_headers = sanitize_headers
         self.lowercase_headers = lowercase_headers
         self.column_mapping = column_mapping
+        self.request_timeout = request_timeout
 
     def _build_range(self, start_row: int, end_row: int) -> str:
         prefix = f"{self.sheet_name}!" if self.sheet_name else ""
@@ -342,7 +358,7 @@ class GoogleSheetsUniqueValuesOperator(BaseOperator):
         return f"{prefix}{start_row}:{end_row}"
 
     def execute(self, context: Any) -> list[str]:
-        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
+        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id, request_timeout=self.request_timeout)
 
         # Read and process headers
         prefix = f"{self.sheet_name}!" if self.sheet_name else ""

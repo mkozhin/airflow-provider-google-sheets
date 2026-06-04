@@ -6,8 +6,10 @@ import json
 import logging
 from typing import Any, Sequence
 
+import httplib2
 from airflow.hooks.base import BaseHook
 from google.oauth2.service_account import Credentials
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError
 
@@ -36,6 +38,13 @@ class GoogleSheetsHook(BaseHook):
 
     Args:
         gcp_conn_id: Airflow Connection ID.
+        request_timeout: Per-request HTTP timeout in seconds passed to
+            ``httplib2``.  Overrides the global ``socket.getdefaulttimeout()``
+            (which Airflow sets via ``AIRFLOW__CORE__SOCKET_TIMEOUT``, default
+            240 s).  Set to a value larger than the longest expected API call
+            (e.g. ``900`` for a 15-minute merge).  ``None`` inherits the
+            Airflow socket timeout — i.e. current behaviour before this
+            parameter was added.
     """
 
     conn_type = "google_sheets"
@@ -43,9 +52,15 @@ class GoogleSheetsHook(BaseHook):
     default_conn_name = "google_cloud_default"
     hook_name = "Google Sheets"
 
-    def __init__(self, gcp_conn_id: str = default_conn_name, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        gcp_conn_id: str = default_conn_name,
+        request_timeout: int | None = 300,
+        **kwargs: Any,
+    ) -> None:
         super().__init__()
         self.gcp_conn_id = gcp_conn_id
+        self.request_timeout = request_timeout
         self._service: Resource | None = None
 
     def get_conn(self) -> Resource:
@@ -85,6 +100,11 @@ class GoogleSheetsHook(BaseHook):
                 f"'{self.gcp_conn_id}': {e}"
             ) from e
 
+        if self.request_timeout is not None:
+            authorized_http = AuthorizedHttp(
+                credentials, http=httplib2.Http(timeout=self.request_timeout)
+            )
+            return build("sheets", "v4", http=authorized_http, cache_discovery=False)
         return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
     # ------------------------------------------------------------------

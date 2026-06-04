@@ -75,6 +75,9 @@ class GoogleSheetsReadOperator(BaseOperator):
             matches **any** entry).  Supports Jinja templating.
             Compatible with Airflow dynamic mapping:
             ``ReadOperator.partial(...).expand(filter_value=op.output)``.
+        request_timeout: Per-request HTTP timeout in seconds.  Overrides the
+            Airflow socket timeout (``AIRFLOW__CORE__SOCKET_TIMEOUT``).
+            ``None`` inherits the Airflow socket timeout.
     """
 
     template_fields: Sequence[str] = (
@@ -113,6 +116,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         max_xcom_bytes: int | None = None,
         filter_column: str | None = None,
         filter_value: str | list[str] | None = None,
+        request_timeout: int | None = 300,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -138,6 +142,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         self.max_xcom_bytes = max_xcom_bytes
         self.filter_column = filter_column
         self.filter_value = filter_value
+        self.request_timeout = request_timeout
 
     # ------------------------------------------------------------------
     # Range helpers
@@ -259,7 +264,7 @@ class GoogleSheetsReadOperator(BaseOperator):
         if (self.filter_column is None) != (self.filter_value is None):
             raise ValueError("filter_column and filter_value must both be set or both be None")
 
-        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
+        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id, request_timeout=self.request_timeout)
 
         headers: list[str] | None = None
         data_start_row = 1

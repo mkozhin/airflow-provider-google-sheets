@@ -100,6 +100,43 @@ class TestCreateSpreadsheet:
         with pytest.raises(HttpError):
             op.execute(context)
 
+    def test_request_timeout_custom(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.create_spreadsheet.return_value = "id"
+            op = GoogleSheetsCreateSpreadsheetOperator(
+                task_id="test", title="T", request_timeout=600
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=600
+            )
+
+    def test_request_timeout_default(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.create_spreadsheet.return_value = "id"
+            op = GoogleSheetsCreateSpreadsheetOperator(task_id="test", title="T")
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=300
+            )
+
+    def test_request_timeout_none(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.create_spreadsheet.return_value = "id"
+            op = GoogleSheetsCreateSpreadsheetOperator(
+                task_id="test", title="T", request_timeout=None
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=None
+            )
+
 
 # ------------------------------------------------------------------
 # CreateSheet
@@ -164,7 +201,54 @@ class TestCreateSheet:
                 sheet_title="Tab",
             )
             op.execute(context)
-            hook_cls.assert_called_once_with(gcp_conn_id="my_custom_conn")
+            hook_cls.assert_called_once_with(gcp_conn_id="my_custom_conn", request_timeout=300)
+
+    def test_request_timeout_custom(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.create_sheet.return_value = {"replies": [{}]}
+            op = GoogleSheetsCreateSheetOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sheet_title="Tab",
+                request_timeout=600,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=600
+            )
+
+    def test_request_timeout_default(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.create_sheet.return_value = {"replies": [{}]}
+            op = GoogleSheetsCreateSheetOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sheet_title="Tab",
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=300
+            )
+
+    def test_request_timeout_none(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.create_sheet.return_value = {"replies": [{}]}
+            op = GoogleSheetsCreateSheetOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sheet_title="Tab",
+                request_timeout=None,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=None
+            )
 
 
 # ------------------------------------------------------------------
@@ -267,6 +351,50 @@ class TestListSheets:
 
         assert isinstance(result, list)
         assert all(isinstance(s, str) for s in result)
+
+    def test_request_timeout_custom(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.get_spreadsheet_metadata.return_value = {"sheets": []}
+            op = GoogleSheetsListSheetsOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                request_timeout=600,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=600
+            )
+
+    def test_request_timeout_default(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.get_spreadsheet_metadata.return_value = {"sheets": []}
+            op = GoogleSheetsListSheetsOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=300
+            )
+
+    def test_request_timeout_none(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.get_spreadsheet_metadata.return_value = {"sheets": []}
+            op = GoogleSheetsListSheetsOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                request_timeout=None,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=None
+            )
 
 
 # ------------------------------------------------------------------
@@ -612,3 +740,59 @@ class TestUniqueValuesOperator:
         )
         result = op.execute(context)
         assert result == ["Moscow", "Berlin", "Paris"]
+
+    def test_request_timeout_custom(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.get_values.side_effect = [[["city"]], []]
+            op = GoogleSheetsUniqueValuesOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                column="city",
+                transliterate_headers=False,
+                sanitize_headers=False,
+                lowercase_headers=False,
+                request_timeout=600,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=600
+            )
+
+    def test_request_timeout_default(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.get_values.side_effect = [[["city"]], []]
+            op = GoogleSheetsUniqueValuesOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                column="city",
+                transliterate_headers=False,
+                sanitize_headers=False,
+                lowercase_headers=False,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=300
+            )
+
+    def test_request_timeout_none(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.manage.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value.get_values.side_effect = [[["city"]], []]
+            op = GoogleSheetsUniqueValuesOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                column="city",
+                transliterate_headers=False,
+                sanitize_headers=False,
+                lowercase_headers=False,
+                request_timeout=None,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(
+                gcp_conn_id="google_cloud_default", request_timeout=None
+            )

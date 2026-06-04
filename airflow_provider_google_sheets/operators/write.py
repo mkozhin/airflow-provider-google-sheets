@@ -63,6 +63,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
             are written as-is.  Applied *after* ``partition_by``, ``schema``, and
             ``merge_key`` resolution so all other parameters reference the
             **original** column names from the input data.
+        request_timeout: Per-request HTTP timeout in seconds.  Overrides the
+            Airflow socket timeout (``AIRFLOW__CORE__SOCKET_TIMEOUT``).  Set to
+            a value larger than the longest expected API call — e.g. ``900`` for
+            a 15-minute merge on large datasets.  ``None`` inherits the Airflow
+            socket timeout.
     """
 
     template_fields: Sequence[str] = (
@@ -101,6 +106,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         partition_by: str | None = None,
         partition_value: str | None = None,
         column_mapping: dict[str, str] | None = None,
+        request_timeout: int | None = 300,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -129,6 +135,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.partition_by = partition_by
         self.partition_value = partition_value
         self.column_mapping = column_mapping
+        self.request_timeout = request_timeout
 
     # ------------------------------------------------------------------
     # helpers
@@ -237,7 +244,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
     # ------------------------------------------------------------------
 
     def execute(self, context: Any) -> dict[str, Any]:
-        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id)
+        hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id, request_timeout=self.request_timeout)
 
         if self.create_sheet_if_missing and self.sheet_name:
             self._ensure_sheet_exists(hook, self.spreadsheet_id, self.sheet_name)

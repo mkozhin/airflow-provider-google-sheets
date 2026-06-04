@@ -1227,3 +1227,33 @@ class TestFilterColumn:
         assert lines[1] == "Moscow,10"
         assert lines[2] == "Moscow,30"
         assert len(lines) == 3
+
+
+class TestRequestTimeout:
+    def _run_op(self, context, timeout_kwargs: dict):
+        with patch(
+            "airflow_provider_google_sheets.operators.read.GoogleSheetsHook"
+        ) as hook_cls:
+            hook = MagicMock()
+            hook_cls.return_value = hook
+            hook.get_values.return_value = [["name"], ["Alice"]]
+            op = GoogleSheetsReadOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                **timeout_kwargs,
+            )
+            op.execute(context)
+            return hook_cls
+
+    def test_custom_timeout_passed_to_hook(self, context):
+        hook_cls = self._run_op(context, {"request_timeout": 120})
+        hook_cls.assert_called_once_with(gcp_conn_id="google_cloud_default", request_timeout=120)
+
+    def test_default_timeout_is_300(self, context):
+        hook_cls = self._run_op(context, {})
+        hook_cls.assert_called_once_with(gcp_conn_id="google_cloud_default", request_timeout=300)
+
+    def test_none_timeout_passed_to_hook(self, context):
+        hook_cls = self._run_op(context, {"request_timeout": None})
+        hook_cls.assert_called_once_with(gcp_conn_id="google_cloud_default", request_timeout=None)
+

@@ -2026,3 +2026,55 @@ class TestMergeDuplicateIncomingKeys:
 
         assert result["deleted"] == 0
         assert result["appended"] == 3
+
+
+class TestRequestTimeout:
+    def test_custom_timeout_passed_to_hook(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.write.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value = MagicMock()
+            hook_cls.return_value.get_spreadsheet_metadata.return_value = {
+                "sheets": [{"properties": {"sheetId": 0, "title": "Sheet1"}}]
+            }
+            hook_cls.return_value.get_values.return_value = []
+            op = GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="overwrite",
+                data=[["a", "b"]],
+                request_timeout=600,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(gcp_conn_id="google_cloud_default", request_timeout=600)
+
+    def test_default_timeout_is_300(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.write.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value = MagicMock()
+            hook_cls.return_value.get_values.return_value = []
+            op = GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="overwrite",
+                data=[["a", "b"]],
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(gcp_conn_id="google_cloud_default", request_timeout=300)
+
+    def test_none_timeout_passed_to_hook(self, context):
+        with patch(
+            "airflow_provider_google_sheets.operators.write.GoogleSheetsHook"
+        ) as hook_cls:
+            hook_cls.return_value = MagicMock()
+            hook_cls.return_value.get_values.return_value = []
+            op = GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="overwrite",
+                data=[["a", "b"]],
+                request_timeout=None,
+            )
+            op.execute(context)
+            hook_cls.assert_called_once_with(gcp_conn_id="google_cloud_default", request_timeout=None)
