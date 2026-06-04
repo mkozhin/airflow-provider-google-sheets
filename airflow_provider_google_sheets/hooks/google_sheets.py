@@ -205,6 +205,7 @@ class GoogleSheetsHook(BaseHook):
                 spreadsheetId=spreadsheet_id,
                 range=range_,
                 valueInputOption=value_input_option,
+                insertDataOption="INSERT_ROWS",
                 body=body,
             )
             .execute()

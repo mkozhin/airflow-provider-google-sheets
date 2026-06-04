@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.9.1
+
+- **Fixed:** `merge` mode failed with HTTP 400 "exceeds grid limits" on historical runs where all incoming keys overlapped existing data — `values.append` now uses `insertDataOption=INSERT_ROWS` which guarantees grid extension after `deleteDimension` shrinks it to zero slack
+- **Added:** `request_timeout` parameter to `GoogleSheetsHook` and all API-calling operators (`GoogleSheetsWriteOperator`, `GoogleSheetsReadOperator`, `GoogleSheetsCreateSpreadsheetOperator`, `GoogleSheetsCreateSheetOperator`, `GoogleSheetsListSheetsOperator`, `GoogleSheetsUniqueValuesOperator`) — default `300` s, overrides Airflow's global socket timeout. Pass `request_timeout=None` to inherit the Airflow default. Fixes `TimeoutError` on large `smart_merge` operations (120k+ rows) where `append_values` exceeds 4 min
+
 ## v0.9.0
 
 - **Added:** `filter_column` and `filter_value` parameters to `GoogleSheetsReadOperator` — include-filter that keeps only rows where the specified column matches the given value(s). OR logic when a list is provided. Both parameters support Jinja templating and dynamic task mapping via `expand(filter_value=...)`. `filter_column` must reference the **processed** header name (after transliterate/sanitize/lowercase/column_mapping)

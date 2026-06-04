@@ -151,6 +151,10 @@ class TestAppendValues:
         result = hook.append_values(SPREADSHEET_ID, RANGE, values)
         assert result == {"updates": {"updatedRows": 1}}
 
+        append_mock = mock_service.spreadsheets().values().append
+        assert append_mock.call_args.kwargs["insertDataOption"] == "INSERT_ROWS"
+        assert append_mock.call_args.kwargs["valueInputOption"] == "USER_ENTERED"
+
 
 class TestClearValues:
     def test_clear_values_calls_api(self, hook, mock_service):
