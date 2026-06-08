@@ -11,10 +11,9 @@ from airflow.models import BaseOperator
 
 from googleapiclient.errors import HttpError
 
-from airflow_provider_google_sheets.exceptions import GoogleSheetsDataError
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
-from airflow_provider_google_sheets.utils.schema import apply_schema_to_value, format_row_for_write, format_value_for_write
+from airflow_provider_google_sheets.utils.schema import apply_schema_to_value, format_row_for_write, normalize_merge_key
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +67,13 @@ class GoogleSheetsWriteOperator(BaseOperator):
             a value larger than the longest expected API call — e.g. ``900`` for
             a 15-minute merge on large datasets.  ``None`` inherits the Airflow
             socket timeout.
+        normalize_merge_key_format: When ``True`` (default), apply extended
+            fallback strategies when normalising merge-key values read from the
+            sheet.  Tries: (1) primary ``format``, (2) ``input_format``,
+            (3) Google Sheets serial date number (for ``date``/``datetime``
+            columns only).  Set to ``False`` to restore legacy behaviour (only
+            the primary ``format`` is tried).  Boolean flags are not
+            template-rendered.
     """
 
     template_fields: Sequence[str] = (
@@ -107,6 +113,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         partition_value: str | None = None,
         column_mapping: dict[str, str] | None = None,
         request_timeout: int | None = 300,
+        normalize_merge_key_format: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -136,6 +143,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.partition_value = partition_value
         self.column_mapping = column_mapping
         self.request_timeout = request_timeout
+        self.normalize_merge_key_format = normalize_merge_key_format
 
     # ------------------------------------------------------------------
     # helpers
@@ -172,16 +180,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
     def _normalize_sheet_key(self, raw: str) -> str:
         """Normalize a key value read from the sheet to canonical write format."""
         key_schema = (self.schema or {}).get(self.merge_key)
-        if not key_schema:
-            return raw
-        # Sheet keys were written using "format" — parse with "format", not "input_format"
-        parse_schema = {k: v for k, v in key_schema.items() if k != "input_format"}
-        try:
-            parsed = apply_schema_to_value(raw, parse_schema)
-            return format_value_for_write(parsed, key_schema)
-        except (ValueError, TypeError, GoogleSheetsDataError):
-            logger.warning("Could not normalize existing key %r via schema, using raw value", raw)
-            return raw
+        return normalize_merge_key(raw, key_schema, extended=self.normalize_merge_key_format)
 
     def _apply_partition(
         self, headers: list[str] | None, rows: list[list[Any]]

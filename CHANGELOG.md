@@ -1,6 +1,11 @@
 # Changelog
 
 
+## v0.10.0
+
+- **Fixed:** `merge` mode no longer creates duplicate rows when the key column in the sheet is stored in a format different from `format` in the schema (regional Sheets format, manual cell format change, serial date number)
+- **Added:** `normalize_merge_key_format` parameter to `GoogleSheetsWriteOperator` (bool, default `True`) — extended key normalization during merge: tries parsing via `format`, then `input_format`, then as a Google Sheets serial date number
+
 ## v0.9.1
 
 - **Fixed:** `merge` mode failed with HTTP 400 "exceeds grid limits" on historical runs where all incoming keys overlapped existing data — `values.append` now uses `insertDataOption=INSERT_ROWS` which guarantees grid extension after `deleteDimension` shrinks it to zero slack
