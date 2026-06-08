@@ -1969,6 +1969,90 @@ class TestMergeInputFormat:
 
 
 # ==================================================================
+# normalize_merge_key_format flag
+# ==================================================================
+
+
+class TestNormalizeMergeKeyFormat:
+    """Smoke tests: normalize_merge_key_format flag controls key normalization during merge."""
+
+    def _make_op(self, data, schema, normalize_merge_key_format=True, **kwargs):
+        defaults = dict(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            schema=schema,
+            normalize_merge_key_format=normalize_merge_key_format,
+            batch_size=1000,
+            pause_between_batches=0,
+        )
+        defaults.update(kwargs)
+        return GoogleSheetsWriteOperator(data=data, **defaults)
+
+    def test_disabled_iso_key_in_sheet_not_normalized(self, mock_hook, context):
+        """normalize_merge_key_format=False: sheet stores key in input_format (ISO '2024-01-01')
+        while output format is '%d.%m.%Y'. Primary format fails to parse ISO → key not normalized
+        → no match → existing row NOT deleted."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["2024-01-01", "old"],   # stored in ISO (input_format), not output format
+        ]
+        schema = {"date": {"type": "date", "input_format": "%Y-%m-%d", "format": "%d.%m.%Y"}}
+        incoming = [{"date": "2024-01-01", "value": "new"}]
+        op = self._make_op(incoming, schema=schema, normalize_merge_key_format=False)
+        result = op.execute(context)
+
+        # extended=False: tries to parse "2024-01-01" via format "%d.%m.%Y" → fails → returns raw "2024-01-01"
+        # incoming "2024-01-01" formatted via format "%d.%m.%Y" → "01.01.2024"
+        # "2024-01-01" != "01.01.2024" → no match → deleted=0
+        assert result["deleted"] == 0
+        assert result["appended"] == 1
+
+    def test_enabled_iso_key_in_sheet_normalized_via_input_format(self, mock_hook, context):
+        """normalize_merge_key_format=True (default): sheet stores key in input_format (ISO)
+        Extended fallback: parse via input_format succeeds → key normalized to output format → match."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["2024-01-01", "old"],   # stored in ISO (input_format), not output format
+        ]
+        schema = {"date": {"type": "date", "input_format": "%Y-%m-%d", "format": "%d.%m.%Y"}}
+        incoming = [{"date": "2024-01-01", "value": "new"}]
+        op = self._make_op(incoming, schema=schema, normalize_merge_key_format=True)
+        result = op.execute(context)
+
+        # extended=True: step1 fails, step2 parses "2024-01-01" via input_format "%Y-%m-%d" → date(2024,1,1)
+        # formatted via format "%d.%m.%Y" → "01.01.2024"
+        # incoming "2024-01-01" formatted via format "%d.%m.%Y" → "01.01.2024"
+        # "01.01.2024" == "01.01.2024" → match → deleted=1
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+
+        # Appended row must use output format
+        appended = mock_hook.append_values.call_args[0][2]
+        assert appended[0][0] == "01.01.2024"
+
+    def test_enabled_serial_date_key_in_sheet_normalized(self, mock_hook, context):
+        """normalize_merge_key_format=True: sheet stores key as serial date number.
+        Extended fallback (step 3) parses serial → date → match with incoming ISO key → deleted=1."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["46023", "old"],   # stored as Google Sheets serial number for 2026-01-01
+        ]
+        schema = {"date": {"type": "date", "format": "%Y-%m-%d"}}
+        incoming = [{"date": "2026-01-01", "value": "new"}]
+        op = self._make_op(incoming, schema=schema, normalize_merge_key_format=True)
+        result = op.execute(context)
+
+        # extended=True: step1 fails (can't parse "46023" via "%Y-%m-%d"), step2 skipped (no input_format),
+        # step3 converts serial "46023" → date(2026,1,1) → "2026-01-01"
+        # incoming "2026-01-01" formatted via "%Y-%m-%d" → "2026-01-01"
+        # "2026-01-01" == "2026-01-01" → match → deleted=1
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+
+
+# ==================================================================
 # merge_key with duplicate incoming values
 # ==================================================================
 
