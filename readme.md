@@ -323,6 +323,7 @@ merge_offset = GoogleSheetsWriteOperator(
 | `batch_size` | int | `1000` | Rows per API request |
 | `pause_between_batches` | float | `1.0` | Seconds between batches |
 | `merge_key` | str | `None` | Key column for merge mode |
+| `normalize_merge_key_format` | bool | `True` | When `True`, merge-key normalization tries extended fallbacks: `input_format`, then Google Sheets serial date number (date/datetime columns only). Set to `False` to restore legacy single-format behaviour |
 | `table_start` | str | `"A1"` | Top-left cell of the table (e.g. `"C3"`). Used by `append` and `merge` to locate the header and resolve column positions. Ignored in `overwrite` mode — which uses `cell_range` instead |
 | `create_sheet_if_missing` | bool | `False` | When `True`, create the target sheet if it does not exist. Safe to use with parallel tasks — concurrent creation attempts are handled gracefully |
 | `partition_by` | str | `None` | Column name to filter data by before writing. Only rows where the column value matches `partition_value` are written |
@@ -346,6 +347,8 @@ Merge reads the key column from the sheet, compares with incoming data, and gene
 2. **Delete** all existing rows for each key present in incoming data (bottom-up to avoid index shifts)
 3. **Append** all incoming rows via `values.append`
 4. **Clear** inherited formatting on the new rows via `repeatCell`
+
+**Key normalization:** Values read from the sheet in step 1 are normalized to match the canonical write format defined in `schema`. When `normalize_merge_key_format=True` (default), three strategies are tried in order: (1) parse with `format`, (2) parse with `input_format`, (3) interpret as a Google Sheets serial date number (date/datetime columns only). Set `normalize_merge_key_format=False` to disable extended normalization.
 
 ### GoogleSheetsCreateSpreadsheetOperator
 
@@ -567,6 +570,8 @@ schema = {
 This is especially important in `merge` mode: without `input_format` the incoming key `"2026-03-01"` and the existing sheet key `"01.03.2026"` would not match, causing duplicate rows on every run.
 
 `input_format` only affects `date` and `datetime` columns. For other types (`str`, `int`, etc.) it has no effect.
+
+When Google Sheets stores a date cell without a date format applied (or converts it back to a raw number), the API returns the serial integer (e.g. `"46023"`). This case is also handled automatically by `normalize_merge_key_format=True` without any additional schema configuration.
 
 ## Examples
 
