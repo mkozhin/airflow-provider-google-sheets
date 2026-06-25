@@ -35,6 +35,13 @@ def sheets_smart_merge_basic():
     #   2024-01-01 | 1000    | US
     #   2024-01-02 | 1500    | EU
     #
+    # No `schema` is passed for the "date" column, yet merge_key="date" with
+    # ISO values (YYYY-MM-DD) is safe by default (normalize_merge_key_format=True):
+    # the column is auto-detected as a date key and the existing key is read back
+    # as a Sheets serial number, so the match survives the column's display
+    # format being changed later (Date <-> Number <-> a different date format).
+    # See readme.md "Schema-free date merge keys" for details and limitations.
+    #
     # Incoming data updates 2024-01-01 and adds 2024-01-03:
     GoogleSheetsWriteOperator(
         task_id="merge_by_date",
