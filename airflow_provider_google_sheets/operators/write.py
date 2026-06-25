@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
 from airflow_provider_google_sheets.utils.merge_key import infer_date_key_schema, normalize_merge_key
+from airflow_provider_google_sheets.utils.merge_planner import _group_contiguous
 from airflow_provider_google_sheets.utils.schema import (
     apply_schema_to_value,
     format_row_for_write,
@@ -507,7 +508,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         for key_val, incoming_row_data in incoming_groups.items():
             existing_row_nums = existing_index.get(key_val, [])
             if existing_row_nums:
-                for seg_start, seg_end in self._group_contiguous(existing_row_nums):
+                for seg_start, seg_end in _group_contiguous(existing_row_nums):
                     delete_ops.append({
                         "row_num": seg_start,
                         "start_index": seg_start - 1,  # 0-based
@@ -611,31 +612,6 @@ class GoogleSheetsWriteOperator(BaseOperator):
             hook.batch_update(self.spreadsheet_id, batch)
             if i + self.batch_size < len(requests):
                 time.sleep(self.pause_between_batches)
-
-    @staticmethod
-    def _group_contiguous(rows: list[int]) -> list[tuple[int, int]]:
-        """Group sorted row numbers into contiguous segments.
-
-        Each segment is ``(start, end)`` where both are 1-based inclusive.
-
-        Example::
-
-            [3, 7, 8, 12] → [(3, 3), (7, 8), (12, 12)]
-        """
-        if not rows:
-            return []
-        groups: list[tuple[int, int]] = []
-        start = rows[0]
-        prev = rows[0]
-        for r in rows[1:]:
-            if r == prev + 1:
-                prev = r
-            else:
-                groups.append((start, prev))
-                start = r
-                prev = r
-        groups.append((start, prev))
-        return groups
 
     @staticmethod
     def _column_letter_to_index(letter: str) -> int:

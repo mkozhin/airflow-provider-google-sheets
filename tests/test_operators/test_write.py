@@ -896,22 +896,6 @@ class TestParseRangeStart:
 
 
 class TestNonContiguousDeletion:
-    def test_group_contiguous_basic(self):
-        f = GoogleSheetsWriteOperator._group_contiguous
-        assert f([3, 7, 8, 12]) == [(3, 3), (7, 8), (12, 12)]
-
-    def test_group_contiguous_all_sequential(self):
-        f = GoogleSheetsWriteOperator._group_contiguous
-        assert f([5, 6, 7]) == [(5, 7)]
-
-    def test_group_contiguous_single(self):
-        f = GoogleSheetsWriteOperator._group_contiguous
-        assert f([10]) == [(10, 10)]
-
-    def test_group_contiguous_empty(self):
-        f = GoogleSheetsWriteOperator._group_contiguous
-        assert f([]) == []
-
     def test_non_contiguous_rows_deleted_separately(self, mock_hook, context):
         """Non-contiguous rows for a key must produce separate delete ops
         so that intermediate rows belonging to other keys are not destroyed."""
