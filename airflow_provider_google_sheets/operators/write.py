@@ -13,8 +13,12 @@ from googleapiclient.errors import HttpError
 
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
-from airflow_provider_google_sheets.utils.merge_key import infer_date_key_schema, normalize_merge_key
-from airflow_provider_google_sheets.utils.merge_planner import _group_contiguous
+from airflow_provider_google_sheets.utils.merge_key import resolve_merge_key_schema
+from airflow_provider_google_sheets.utils.merge_planner import (
+    MergePlan,
+    build_existing_key_index,
+    plan_merge_operations,
+)
 from airflow_provider_google_sheets.utils.schema import (
     apply_schema_to_value,
     format_row_for_write,
@@ -439,15 +443,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
             str(r[key_col_idx]) for r in rows
             if key_col_idx < len(r) and r[key_col_idx] not in (None, "")
         ]
-        key_schema = explicit_key_schema
-        if key_schema is None and self.normalize_merge_key_format:
-            key_schema = infer_date_key_schema(incoming_key_strs)
-            if key_schema is not None:
-                logger.info(
-                    "merge_key '%s' looks like a date column (no schema provided) — "
-                    "applying automatic date normalization",
-                    self.merge_key,
-                )
+        key_schema = resolve_merge_key_schema(
+            explicit_key_schema, incoming_key_strs, infer=self.normalize_merge_key_format
+        )
+        if explicit_key_schema is None and key_schema is not None:
+            logger.info(
+                "merge_key '%s' looks like a date column (no schema provided) — "
+                "applying automatic date normalization",
+                self.merge_key,
+            )
 
         # SERIAL_NUMBER only when there's a real need to decode a serial number
         # as a date (type="date", normalization enabled). "datetime" is
@@ -476,19 +480,13 @@ class GoogleSheetsWriteOperator(BaseOperator):
             headers_just_written = True
 
         # Build index: {key_value: [row_numbers]} (1-based absolute)
-        existing_index: dict[str, list[int]] = defaultdict(list)
-        if self.has_headers:
-            data_rows = existing_keys_raw[1:]
-            start_row_num = table_start_row + 1
-        else:
-            data_rows = existing_keys_raw
-            start_row_num = table_start_row
-        for row_num, row in enumerate(data_rows, start=start_row_num):
-            if row:
-                key_val = normalize_merge_key(
-                    str(row[0]), key_schema, extended=self.normalize_merge_key_format
-                )
-                existing_index[key_val].append(row_num)
+        existing_index = build_existing_key_index(
+            existing_keys_raw,
+            has_headers=self.has_headers,
+            table_start_row=table_start_row,
+            key_schema=key_schema,
+            extended=self.normalize_merge_key_format,
+        )
 
         # Step 3 — Group incoming data by key
         incoming_groups: dict[str, list[list[Any]]] = defaultdict(list)
@@ -502,26 +500,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # Keys present in the sheet but absent from incoming data are left untouched.
         sheet_id = self._get_sheet_id(hook)
 
-        delete_ops: list[dict] = []   # deleteDimension requests
-        append_rows: list[list[Any]] = []
-
-        for key_val, incoming_row_data in incoming_groups.items():
-            existing_row_nums = existing_index.get(key_val, [])
-            if existing_row_nums:
-                for seg_start, seg_end in _group_contiguous(existing_row_nums):
-                    delete_ops.append({
-                        "row_num": seg_start,
-                        "start_index": seg_start - 1,  # 0-based
-                        "end_index": seg_end,           # exclusive
-                    })
-            append_rows.extend(incoming_row_data)
+        plan: MergePlan = plan_merge_operations(existing_index, incoming_groups)
+        delete_ops = plan.delete_ops
+        append_rows = plan.append_rows
 
         # Step 5 — Execute deletes bottom-up (descending row number avoids index shifts)
         stats = {"deleted": 0, "appended": 0}
         total_deleted = 0
 
         if delete_ops:
-            delete_ops.sort(key=lambda op: op["row_num"], reverse=True)
             batch_requests = [
                 {
                     "deleteDimension": {
