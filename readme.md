@@ -323,7 +323,7 @@ merge_offset = GoogleSheetsWriteOperator(
 | `batch_size` | int | `1000` | Rows per API request |
 | `pause_between_batches` | float | `1.0` | Seconds between batches |
 | `merge_key` | str | `None` | Key column for merge mode |
-| `normalize_merge_key_format` | bool | `True` | When `True`, merge-key normalization tries extended fallbacks: `input_format`, then Google Sheets serial date number (date/datetime columns only). Set to `False` to restore legacy single-format behaviour |
+| `normalize_merge_key_format` | bool | `True` | When `True`, merge-key normalization tries extended fallbacks: `input_format`, then Google Sheets serial date number (date/datetime columns only). Also enables schema-free date inference for `merge_key` (see below). Set to `False` to restore legacy single-format behaviour |
 | `table_start` | str | `"A1"` | Top-left cell of the table (e.g. `"C3"`). Used by `append` and `merge` to locate the header and resolve column positions. Ignored in `overwrite` mode — which uses `cell_range` instead |
 | `create_sheet_if_missing` | bool | `False` | When `True`, create the target sheet if it does not exist. Safe to use with parallel tasks — concurrent creation attempts are handled gracefully |
 | `partition_by` | str | `None` | Column name to filter data by before writing. Only rows where the column value matches `partition_value` are written |
@@ -349,6 +349,8 @@ Merge reads the key column from the sheet, compares with incoming data, and gene
 4. **Clear** inherited formatting on the new rows via `repeatCell`
 
 **Key normalization:** Values read from the sheet in step 1 are normalized to match the canonical write format defined in `schema`. When `normalize_merge_key_format=True` (default), three strategies are tried in order: (1) parse with `format`, (2) parse with `input_format`, (3) interpret as a Google Sheets serial date number (date/datetime columns only). Set `normalize_merge_key_format=False` to disable extended normalization.
+
+**Schema-free date merge keys:** If `merge_key` has no entry in `schema` at all, merging by an ISO date key (`YYYY-MM-DD`, e.g. `"2026-01-01"`) is safe out of the box when `normalize_merge_key_format=True` (default) — the column is auto-detected as a date key from the shape of the incoming values, and the existing sheet key is read back as a serial number so the match survives the column's display format being changed (Date ↔ Number ↔ a different date format). This auto-detection only recognizes the `YYYY-MM-DD` shape. Other date formats (e.g. `"01.03.2026"`) and `datetime` keys (e.g. `"2026-01-01 12:30:00"`) are **not** inferred without `schema` — for those, pass an explicit `schema` entry for `merge_key` (with `format`/`input_format` as needed, see below). Set `normalize_merge_key_format=False` to disable this inference and restore strictly legacy behaviour (raw values compared as-is).
 
 ### GoogleSheetsCreateSpreadsheetOperator
 
@@ -571,7 +573,7 @@ This is especially important in `merge` mode: without `input_format` the incomin
 
 `input_format` only affects `date` and `datetime` columns. For other types (`str`, `int`, etc.) it has no effect.
 
-When Google Sheets stores a date cell without a date format applied (or converts it back to a raw number), the API returns the serial integer (e.g. `"46023"`). This case is also handled automatically by `normalize_merge_key_format=True` without any additional schema configuration.
+When Google Sheets stores a date cell without a date format applied (or converts it back to a raw number), the API returns the serial integer (e.g. `"46023"`). With an explicit `schema` entry and `type: "date"`, this case is handled robustly by `normalize_merge_key_format=True`: the key column is read with the `SERIAL_NUMBER` render option, so matching is unaffected by the cell's display format. For `date` keys specifically, this also works **without** any `schema` entry at all, as long as the incoming values are ISO dates (`YYYY-MM-DD`) — see "Schema-free date merge keys" above. For `type: "datetime"`, the key column is always read as `FORMATTED_STRING` (never `SERIAL_NUMBER`, to avoid truncating time-of-day in the common case); if the cell's format happens to display a bare serial number, the existing key can still fall back to being decoded from it, but only down to date granularity — **time-of-day is truncated to midnight**. `datetime` keys always require an explicit `schema`; there is no schema-free inference for them.
 
 ## Examples
 

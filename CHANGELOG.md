@@ -1,6 +1,12 @@
 # Changelog
 
 
+## v0.11.0
+
+- **Fixed:** `merge` mode no longer creates duplicate rows for `date` key columns when no `schema` is provided for `merge_key` and the sheet's column display format changes (Date ↔ Number ↔ a different date format). Root cause: `normalize_merge_key()` bailed out immediately when no `schema` entry existed for the key column, so the extended normalization added in `v0.10.0` never ran; additionally, the key column was always read with `date_time_render_option="FORMATTED_STRING"`, so even with an explicit `schema` the serial-number fallback was effectively unreachable
+- **Added:** schema-free date inference for `merge_key` — when `merge_key` has no `schema` entry and the incoming values are ISO dates (`YYYY-MM-DD`), the column is automatically inferred as a `date` key and the existing sheet key is read back via the Google Sheets serial-number render option, making the merge robust to display-format changes without requiring any `schema` configuration. Gated by `normalize_merge_key_format` (default `True`); set to `False` to keep strictly legacy behaviour
+- **Scope:** this inference only covers `date`-typed keys in `YYYY-MM-DD` form. `datetime` keys without an explicit `schema` are intentionally **not** inferred (decoding a serial number to `datetime` would silently drop the time-of-day, which would be a partial guarantee dressed up as a full one) — `datetime` merge keys continue to require an explicit `schema` entry, unchanged from `v0.10.0`
+
 ## v0.10.0
 
 - **Fixed:** `merge` mode no longer creates duplicate rows when the key column in the sheet is stored in a format different from `format` in the schema (regional Sheets format, manual cell format change, serial date number)

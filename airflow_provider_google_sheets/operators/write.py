@@ -77,7 +77,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
             sheet.  Tries: (1) primary ``format``, (2) ``input_format``,
             (3) Google Sheets serial date number (for ``date``/``datetime``
             columns only).  Set to ``False`` to restore legacy behaviour (only
-            the primary ``format`` is tried).  Boolean flags are not
+            the primary ``format`` is tried).  This flag also gates schema-free
+            inference (Inferred Schema): when no explicit ``schema`` entry is
+            given for ``merge_key`` and the incoming values look like ISO dates
+            (``YYYY-MM-DD``), the column is automatically treated as a ``date``
+            key and read back with a serial-number render option so it is
+            robust to the sheet's display format changing — without requiring
+            any ``schema`` to be passed at all. Set to ``False`` to disable this
+            inference too (key read falls back to the legacy
+            ``FORMATTED_STRING`` behaviour). Boolean flags are not
             template-rendered.
     """
 
