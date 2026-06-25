@@ -13,11 +13,10 @@ from googleapiclient.errors import HttpError
 
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
+from airflow_provider_google_sheets.utils.merge_key import infer_date_key_schema, normalize_merge_key
 from airflow_provider_google_sheets.utils.schema import (
     apply_schema_to_value,
     format_row_for_write,
-    infer_date_key_schema,
-    normalize_merge_key,
 )
 
 logger = logging.getLogger(__name__)

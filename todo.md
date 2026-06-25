@@ -6,7 +6,7 @@
 `docs/plans/20260624-merge-key-date-normalization.md`). Для `date`-ключей в
 ISO-формате (`YYYY-MM-DD`) merge теперь безопасен **даже без `schema`**:
 колонка автоматически распознаётся как дата (`infer_date_key_schema` в
-`utils/schema.py`), а существующий ключ читается через
+`utils/merge_key.py`), а существующий ключ читается через
 `date_time_render_option="SERIAL_NUMBER"`, что устойчиво к смене формата
 отображения столбца. Сознательно вне scope: `datetime`-ключи без `schema` (не
 распознаются автоматически — decode serial-числа в `datetime` теряет время
@@ -14,7 +14,7 @@ ISO-формате (`YYYY-MM-DD`) merge теперь безопасен **даж
 Для `datetime` и других форматов explicit `schema` остаётся обязательной, как
 и раньше.
 
-**Где:** `GoogleSheetsWriteOperator` (write_mode="merge"), `utils/schema.py: normalize_merge_key()`.
+**Где:** `GoogleSheetsWriteOperator` (write_mode="merge"), `utils/merge_key.py: normalize_merge_key()`.
 
 **Проблема:**
 

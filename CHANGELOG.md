@@ -1,6 +1,10 @@
 # Changelog
 
 
+## v0.12.0
+
+- **Internal:** merge-key normalization (`normalize_merge_key`, `infer_date_key_schema`) moved from `utils/schema.py` to a new `utils/merge_key.py` module — pure refactor, no functional behavior change, except: merge-key warning/info logs now use logger `airflow_provider_google_sheets.utils.merge_key` instead of `airflow_provider_google_sheets.utils.schema`. This is technically observable to callers that filter logs by logger name
+
 ## v0.11.0
 
 - **Fixed:** `merge` mode no longer creates duplicate rows for `date` key columns when no `schema` is provided for `merge_key` and the sheet's column display format changes (Date ↔ Number ↔ a different date format). Root cause: `normalize_merge_key()` bailed out immediately when no `schema` entry existed for the key column, so the extended normalization added in `v0.10.0` never ran; additionally, the key column was always read with `date_time_render_option="FORMATTED_STRING"`, so even with an explicit `schema` the serial-number fallback was effectively unreachable
