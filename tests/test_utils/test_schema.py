@@ -11,6 +11,7 @@ from airflow_provider_google_sheets.utils.schema import (
     apply_schema_to_value,
     format_row_for_write,
     format_value_for_write,
+    infer_date_key_schema,
     normalize_merge_key,
     validate_schema,
 )
@@ -435,6 +436,34 @@ class TestNormalizeMergeKey:
             result = normalize_merge_key("not-a-date!", schema, extended=False)
         assert result == "not-a-date!"
         assert caplog.records, "Expected a warning to be logged"
+
+
+class TestInferDateKeySchema:
+    """Tests for infer_date_key_schema (schema-free ISO-date detection)."""
+
+    def test_iso_dates_detected(self):
+        result = infer_date_key_schema(["2026-01-01", "2026-01-02"])
+        assert result == {"type": "date", "format": "%Y-%m-%d"}
+
+    def test_datetime_like_strings_not_supported(self):
+        assert infer_date_key_schema(["2026-01-01 12:30:00"]) is None
+
+    def test_mixed_values_returns_none(self):
+        assert infer_date_key_schema(["2026-01-01", "abc"]) is None
+
+    def test_empty_list_returns_none(self):
+        assert infer_date_key_schema([]) is None
+
+    def test_list_of_empty_strings_returns_none(self):
+        assert infer_date_key_schema(["", "", ""]) is None
+
+    def test_numeric_ids_not_detected_as_dates(self):
+        assert infer_date_key_schema(["1001", "1002"]) is None
+
+    def test_syntactically_valid_but_calendar_invalid_date_returns_none(self):
+        """date.fromisoformat(), not just the regex, must reject garbage dates."""
+        assert infer_date_key_schema(["9999-99-99"]) is None
+        assert infer_date_key_schema(["2026-02-30"]) is None
 
 
 class TestStripStrings:

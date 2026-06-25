@@ -222,6 +222,43 @@ def format_row_for_write(
 # 1899-12-30 (serial 1 → 1899-12-31, serial 2 → 1900-01-01, …).
 _SHEETS_EPOCH = date(1899, 12, 30)
 
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def infer_date_key_schema(values: list[str]) -> dict | None:
+    """Infer an ISO-date schema for a merge key column from incoming values.
+
+    Used to make date-keyed merges safe even when the caller does not pass an
+    explicit ``schema`` for the merge-key column. Looks only at the shape of
+    the *incoming* (current run) key values — if every non-empty value looks
+    like an ISO date (``YYYY-MM-DD``) and parses as a real calendar date, the
+    column is treated as a date column.
+
+    The check is strict on purpose: **all** non-empty values must match,
+    otherwise ``None`` is returned. This avoids false positives on columns
+    that merely happen to contain a few date-like strings (e.g. free-text or
+    ID columns).
+
+    Args:
+        values: Raw incoming key values (as strings) for the current run.
+
+    Returns:
+        ``{"type": "date", "format": "%Y-%m-%d"}`` if all non-empty values are
+        valid ISO dates, otherwise ``None``. Also returns ``None`` for an
+        empty input or one containing only empty strings.
+    """
+    samples = [v for v in values if v]
+    if not samples:
+        return None
+    for v in samples:
+        if not _ISO_DATE_RE.match(v):
+            return None
+        try:
+            date.fromisoformat(v)
+        except ValueError:
+            return None
+    return {"type": "date", "format": "%Y-%m-%d"}
+
 
 def normalize_merge_key(
     raw: str,
