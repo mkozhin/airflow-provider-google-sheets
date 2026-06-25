@@ -13,7 +13,12 @@ from googleapiclient.errors import HttpError
 
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
-from airflow_provider_google_sheets.utils.schema import apply_schema_to_value, format_row_for_write, normalize_merge_key
+from airflow_provider_google_sheets.utils.schema import (
+    apply_schema_to_value,
+    format_row_for_write,
+    infer_date_key_schema,
+    normalize_merge_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,11 +181,6 @@ class GoogleSheetsWriteOperator(BaseOperator):
                         preprocessed[i] = apply_schema_to_value(value, col_schema)
             result.append(format_row_for_write(preprocessed, headers, self.schema))
         return result
-
-    def _normalize_sheet_key(self, raw: str) -> str:
-        """Normalize a key value read from the sheet to canonical write format."""
-        key_schema = (self.schema or {}).get(self.merge_key)
-        return normalize_merge_key(raw, key_schema, extended=self.normalize_merge_key_format)
 
     def _apply_partition(
         self, headers: list[str] | None, rows: list[list[Any]]
@@ -421,8 +421,43 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # Step 2 — Determine the absolute key column letter and read from start row
         abs_key_col = self._index_to_column_letter(start_col_idx + key_col_idx)
         key_range = f"{prefix}{abs_key_col}{table_start_row}:{abs_key_col}"
+
+        # Resolve key_schema BEFORE reading key_range — it determines which
+        # date_time_render_option to use. Explicit schema wins; otherwise,
+        # when normalize_merge_key_format is enabled, infer an ISO-date schema
+        # from the shape of the incoming key values.
+        explicit_key_schema = (self.schema or {}).get(self.merge_key)
+        incoming_key_strs = [
+            str(r[key_col_idx]) for r in rows
+            if key_col_idx < len(r) and r[key_col_idx] not in (None, "")
+        ]
+        key_schema = explicit_key_schema
+        if key_schema is None and self.normalize_merge_key_format:
+            key_schema = infer_date_key_schema(incoming_key_strs)
+            if key_schema is not None:
+                logger.info(
+                    "merge_key '%s' looks like a date column (no schema provided) — "
+                    "applying automatic date normalization",
+                    self.merge_key,
+                )
+
+        # SERIAL_NUMBER only when there's a real need to decode a serial number
+        # as a date (type="date", normalization enabled). "datetime" is
+        # intentionally excluded — decoding via int(float()) truncates time of
+        # day, which would break the already-working explicit-schema-datetime
+        # case. normalize_merge_key_format=False always reads FORMATTED_STRING
+        # (strict legacy — the raw value itself does not change).
+        use_serial_number = (
+            self.normalize_merge_key_format
+            and key_schema is not None
+            and key_schema.get("type") == "date"
+        )
         logger.info("Reading key column from %s", key_range)
-        existing_keys_raw = hook.get_values(self.spreadsheet_id, key_range)
+        existing_keys_raw = hook.get_values(
+            self.spreadsheet_id,
+            key_range,
+            date_time_render_option="SERIAL_NUMBER" if use_serial_number else "FORMATTED_STRING",
+        )
 
         # Write headers if the sheet is completely empty
         headers_just_written = False
@@ -442,7 +477,9 @@ class GoogleSheetsWriteOperator(BaseOperator):
             start_row_num = table_start_row
         for row_num, row in enumerate(data_rows, start=start_row_num):
             if row:
-                key_val = self._normalize_sheet_key(str(row[0]))
+                key_val = normalize_merge_key(
+                    str(row[0]), key_schema, extended=self.normalize_merge_key_format
+                )
                 existing_index[key_val].append(row_num)
 
         # Step 3 — Group incoming data by key

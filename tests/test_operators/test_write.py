@@ -2051,6 +2051,155 @@ class TestNormalizeMergeKeyFormat:
         assert result["deleted"] == 1
         assert result["appended"] == 1
 
+        # Explicit schema with type="date" must also trigger SERIAL_NUMBER reads
+        # (use_serial_number is keyed on key_schema.get("type") == "date" regardless
+        # of whether key_schema came from an explicit schema or from inference).
+        kwargs = mock_hook.get_values.call_args.kwargs
+        assert kwargs.get("date_time_render_option") == "SERIAL_NUMBER"
+
+
+# ==================================================================
+# Schema-free date merge-key inference (Inferred Schema)
+# ==================================================================
+
+
+class TestMergeSchemaFreeDateInference:
+    """merge_key date normalization without an explicit schema.
+
+    Regression coverage for the production incident where a date-typed
+    merge_key column had no explicit schema, and a manual format change on
+    the sheet (Date → Number) caused merge to silently duplicate rows.
+    """
+
+    def _make_op(self, data, merge_key="date", **kwargs):
+        defaults = dict(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key=merge_key,
+            batch_size=1000,
+            pause_between_batches=0,
+        )
+        defaults.update(kwargs)
+        return GoogleSheetsWriteOperator(data=data, **defaults)
+
+    def test_iso_date_key_no_schema_serial_number_in_sheet_matches(self, mock_hook, context):
+        """No schema, incoming ISO dates; sheet stores key as a serial number
+        (e.g. after the cell display format was reset) → still matches and
+        updates instead of duplicating."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["46023", "old"],  # serial number for 2026-01-01
+        ]
+        incoming = [
+            {"date": "2026-01-01", "value": "new"},
+            {"date": "2026-01-02", "value": "new2"},
+        ]
+        op = self._make_op(incoming)
+        result = op.execute(context)
+
+        assert result["deleted"] == 1
+        assert result["appended"] == 2
+
+        kwargs = mock_hook.get_values.call_args.kwargs
+        assert kwargs.get("date_time_render_option") == "SERIAL_NUMBER"
+
+    def test_numeric_non_date_key_no_schema_unaffected(self, mock_hook, context):
+        """No schema, numeric (non-date) merge_key → no date inference,
+        behaviour unchanged, FORMATTED_STRING still used."""
+        mock_hook.get_values.return_value = [
+            ["id", "value"],
+            ["1001", "old"],
+        ]
+        incoming = [
+            {"id": "1001", "value": "new"},
+            {"id": "1002", "value": "new2"},
+        ]
+        op = self._make_op(incoming, merge_key="id")
+        result = op.execute(context)
+
+        assert result["deleted"] == 1
+        assert result["appended"] == 2
+
+        kwargs = mock_hook.get_values.call_args.kwargs
+        assert kwargs.get("date_time_render_option") == "FORMATTED_STRING"
+
+    def test_explicit_non_date_schema_blocks_inference(self, mock_hook, context):
+        """Explicit schema entry for merge_key (even non-date) wins over
+        inference — inference is never even attempted, read stays
+        FORMATTED_STRING."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["2026-01-01", "old"],
+        ]
+        schema = {"date": {"type": "str"}}
+        incoming = [{"date": "2026-01-01", "value": "new"}]
+        op = self._make_op(incoming, schema=schema)
+        result = op.execute(context)
+
+        kwargs = mock_hook.get_values.call_args.kwargs
+        assert kwargs.get("date_time_render_option") == "FORMATTED_STRING"
+        # type="str" → normalize_merge_key returns raw unchanged → exact string match
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+
+    def test_normalize_merge_key_format_false_forces_formatted_string(self, mock_hook, context):
+        """Regression guard (review finding #1): normalize_merge_key_format=False
+        disables inference entirely AND forces FORMATTED_STRING, even though
+        incoming keys look like ISO dates — the flag is strictly legacy, not
+        just legacy normalization on top of a changed read."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["2026-01-01", "old"],
+        ]
+        incoming = [{"date": "2026-01-01", "value": "new"}]
+        op = self._make_op(incoming, normalize_merge_key_format=False)
+        op.execute(context)
+
+        kwargs = mock_hook.get_values.call_args.kwargs
+        assert kwargs.get("date_time_render_option") == "FORMATTED_STRING"
+
+    def test_explicit_datetime_schema_matching_format_keeps_formatted_string(
+        self, mock_hook, context
+    ):
+        """Regression guard (review finding #2): explicit schema with
+        type="datetime", format matching the sheet's current display, and a
+        non-midnight time of day → still matches WITHOUT losing time of day
+        (FORMATTED_STRING, not SERIAL_NUMBER — Step 1 parses the formatted
+        string directly)."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["2026-01-01 12:30:00", "old"],
+        ]
+        schema = {"date": {"type": "datetime", "format": "%Y-%m-%d %H:%M:%S"}}
+        incoming = [{"date": "2026-01-01 12:30:00", "value": "new"}]
+        op = self._make_op(incoming, schema=schema)
+        result = op.execute(context)
+
+        kwargs = mock_hook.get_values.call_args.kwargs
+        assert kwargs.get("date_time_render_option") == "FORMATTED_STRING"
+        # Time of day preserved → keys match → old row replaced, not duplicated
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+
+    def test_datetime_like_incoming_keys_no_schema_inference_skipped(self, mock_hook, context):
+        """No schema, incoming keys look like datetimes
+        ('2026-01-01 12:30:00') rather than plain ISO dates → inference
+        returns None (datetime is not supported schema-free), read stays
+        FORMATTED_STRING, behaviour unchanged from before this fix."""
+        mock_hook.get_values.return_value = [
+            ["date", "value"],
+            ["2026-01-01 12:30:00", "old"],
+        ]
+        incoming = [{"date": "2026-01-01 12:30:00", "value": "new"}]
+        op = self._make_op(incoming)
+        result = op.execute(context)
+
+        kwargs = mock_hook.get_values.call_args.kwargs
+        assert kwargs.get("date_time_render_option") == "FORMATTED_STRING"
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+
 
 # ==================================================================
 # merge_key with duplicate incoming values
