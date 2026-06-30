@@ -6,7 +6,6 @@ __pycache__
 **/.env
 .env
 .DS_Store
-/CLAUDE.md
 /PLAN.md
 
 # Generated version file
@@ -17,5 +16,3 @@ dist/
 build/
 *.egg-info/
 /.claude/
-docs/plans/
-/CONTEXT.md
