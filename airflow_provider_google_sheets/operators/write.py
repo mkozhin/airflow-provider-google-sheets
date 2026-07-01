@@ -468,8 +468,31 @@ class GoogleSheetsWriteOperator(BaseOperator):
         if not target.startswith(prefix) and prefix:
             target = f"{prefix}{target}"
 
-        # Write headers if the sheet is empty and write_headers is requested
-        if self.write_headers and headers:
+        # Determine header state and, when sorting, the existing table height.
+        header_written_this_run = False
+        existing_row_count = 0
+        if self.sort_keys:
+            # Sorting needs the existing table height. The first column may
+            # have internal gaps and Sheets trims trailing empties, so read
+            # the full table width and take the last row that has any
+            # non-empty cell.
+            start_col_idx = self._column_letter_to_index(start_col)
+            end_col = self._index_to_column_letter(start_col_idx + len(headers) - 1)
+            existing_block = hook.get_values(
+                self.spreadsheet_id, f"{prefix}{start_col}{start_row}:{end_col}"
+            )
+            for i, r in enumerate(existing_block):
+                if any(str(c).strip() for c in r):
+                    existing_row_count = i + 1
+            header_written_this_run = (
+                existing_row_count == 0 and self.write_headers and bool(headers)
+            )
+            if header_written_this_run:
+                header_range = f"{prefix}{start_col}{start_row}"
+                logger.info("Sheet is empty — writing headers to %s", header_range)
+                hook.update_values(self.spreadsheet_id, header_range, [headers])
+        elif self.write_headers and headers:
+            # Legacy single-cell emptiness check (backward compatible).
             first_row = hook.get_values(
                 self.spreadsheet_id, f"{prefix}{start_col}{start_row}"
             )
@@ -486,6 +509,27 @@ class GoogleSheetsWriteOperator(BaseOperator):
             total_written += len(batch)
             if i + self.batch_size < len(rows):
                 time.sleep(self.pause_between_batches)
+
+        # Server-side sort (cell_range is already blocked in __init__ when set).
+        if self.sort_keys:
+            skip_header = header_written_this_run or (
+                existing_row_count > 0 and self.has_headers
+            )
+            end_row = (
+                (start_row - 1)
+                + existing_row_count
+                + (1 if header_written_this_run else 0)
+                + len(rows)
+            )
+            self._execute_sort(
+                hook,
+                headers,
+                self._get_sheet_id(hook),
+                start_col,
+                start_row,
+                skip_header,
+                end_row,
+            )
 
         logger.info("Append complete: %d rows written", total_written)
         return {"mode": "append", "rows_written": total_written}

@@ -2699,3 +2699,121 @@ class TestOverwriteSortKeys:
         assert sort_range is not None
         # mapped header order: ["date", "val"] → "date" at index 0
         assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+
+
+# ==================================================================
+# sort_keys — Task 4: integration into _execute_append
+# ==================================================================
+
+
+class TestAppendSortKeys:
+    def test_append_non_empty_sheet_sort(self, mock_hook, context):
+        """Non-empty sheet + has_headers=True → skip_header, end covers all rows."""
+        # full-width read: header + 2 data rows
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-01", "a"],
+            ["2024-01-02", "b"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-03", "region": "c"}],
+            has_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 3 rows + 1 new = 4
+        assert rng["endRowIndex"] == 4
+        # header present → skip it
+        assert rng["startRowIndex"] == 1
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "DESCENDING"
+        # no header re-written on a non-empty sheet
+        mock_hook.update_values.assert_not_called()
+
+    def test_append_empty_sheet_write_headers_sort(self, mock_hook, context):
+        """Empty sheet + write_headers=True → header written, skip_header."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            write_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_called_once()
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # 1 header + 1 data row
+        assert rng["endRowIndex"] == 2
+        assert rng["startRowIndex"] == 1
+
+    def test_append_empty_sheet_no_headers_sort(self, mock_hook, context):
+        """Empty sheet + write_headers=False → no header, no skip."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            write_headers=False,
+            has_headers=False,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_not_called()
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        assert rng["endRowIndex"] == 1
+        assert rng["startRowIndex"] == 0
+
+    def test_append_sort_counts_full_width_not_first_column(self, mock_hook, context):
+        """Existing rows counted across full width, not by the first column."""
+        # First column is empty on every row; second column has data.
+        mock_hook.get_values.return_value = [["", "x"], ["", "y"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-03", "region": "z"}],
+            has_headers=False,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        # existing_row_count = 2 (counted by full width) + 1 new = 3
+        assert sort_range["range"]["endRowIndex"] == 3
+        # full-width read range, not a single cell
+        read_range = mock_hook.get_values.call_args[0][1]
+        assert read_range.endswith("A1:B")
+
+    def test_append_no_sort_keys_no_sort_range(self, mock_hook, context):
+        """sort_keys=None → no sortRange, single-cell emptiness check kept."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            write_headers=True,
+        )
+        op.execute(context)
+
+        assert _find_sort_range(mock_hook) is None
+        # emptiness check uses a single cell, not a full-width range
+        check_range = mock_hook.get_values.call_args[0][1]
+        assert check_range.endswith("A1")
+        assert ":" not in check_range
