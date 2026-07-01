@@ -103,6 +103,25 @@ class GoogleSheetsWriteOperator(BaseOperator):
             ``cell_range`` (write target and sort range must share the same
             ``table_start``).  Format is validated at DAG-load time; it is not a
             template field.
+        transient_404_max_retries: Number of times to re-run the *whole*
+            operation when Google Sheets returns a transient ``404`` on a
+            spreadsheet that really exists (observed after heavy writes).  Only
+            applies to the idempotent modes — ``overwrite`` and ``merge`` — and
+            to ``create_sheet_if_missing`` setup; ``append`` is intentionally
+            excluded (not idempotent, so it stays fail-fast).  A non-404
+            ``HttpError`` is re-raised immediately.  Must be a non-bool
+            ``int >= 0``; ``0`` disables the retry.  Defaults to ``3``.
+        transient_404_base_delay: Base delay in seconds for the exponential
+            backoff between transient-404 re-runs (delay =
+            ``base_delay * 2 ** (attempt - 1)``).  Must be a non-bool
+            real (``int``/``float``) ``>= 0``.  Defaults to ``5.0``.
+
+            Worst-case wall time: with the defaults, up to ``1 + 3 = 4`` full
+            re-runs of the operation with ``5 + 10 + 20 = 35`` seconds of
+            backoff between them, each call bounded by ``request_timeout``.
+            Re-running a large write can take minutes but is safe (the modes are
+            idempotent on full re-run).  Keep the Airflow ``execution_timeout``
+            comfortably above this.
     """
 
     template_fields: Sequence[str] = (
@@ -144,6 +163,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
         request_timeout: int | None = 300,
         normalize_merge_key_format: bool = True,
         sort_keys: list[str] | None = None,
+        transient_404_max_retries: int = 3,
+        transient_404_base_delay: float = 5.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -175,6 +196,37 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.request_timeout = request_timeout
         self.normalize_merge_key_format = normalize_merge_key_format
         self.sort_keys = sort_keys
+        self.transient_404_max_retries = transient_404_max_retries
+        self.transient_404_base_delay = transient_404_base_delay
+
+        # Validate transient-404 retry knobs on DAG-load (like other params) so
+        # mistakes surface at parse time rather than mid-run. bool is a subclass
+        # of int, so True/False must be rejected explicitly — otherwise they'd
+        # silently mean 1/0 retries or a 0/1s delay.
+        if isinstance(transient_404_max_retries, bool) or not isinstance(
+            transient_404_max_retries, int
+        ):
+            raise TypeError(
+                "transient_404_max_retries must be a non-bool int, got "
+                f"{type(transient_404_max_retries).__name__}"
+            )
+        if transient_404_max_retries < 0:
+            raise ValueError(
+                "transient_404_max_retries must be >= 0, got "
+                f"{transient_404_max_retries}"
+            )
+        if isinstance(transient_404_base_delay, bool) or not isinstance(
+            transient_404_base_delay, (int, float)
+        ):
+            raise TypeError(
+                "transient_404_base_delay must be a non-bool int or float, got "
+                f"{type(transient_404_base_delay).__name__}"
+            )
+        if transient_404_base_delay < 0:
+            raise ValueError(
+                "transient_404_base_delay must be >= 0, got "
+                f"{transient_404_base_delay}"
+            )
 
         # Full format validation happens here (in __init__) so that mistakes
         # surface at DAG-load time. sort_keys is intentionally NOT a template
@@ -317,6 +369,36 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 else:
                     raise
 
+    def _run_with_transient_404_retry(self, fn: Any) -> Any:
+        """Run *fn*, re-running the whole call on a transient Google 404.
+
+        Only ``404`` is retried (the observed transient failure on an existing
+        spreadsheet after heavy writes). Any other ``HttpError`` — and a 404
+        once ``transient_404_max_retries`` re-runs are exhausted — is re-raised
+        immediately. Used only to wrap the idempotent operations
+        (overwrite / merge / ensure-sheet); ``append`` is never wrapped.
+        """
+        attempt = 0
+        while True:
+            try:
+                return fn()
+            except HttpError as e:
+                if (
+                    e.resp.status != 404
+                    or attempt >= self.transient_404_max_retries
+                ):
+                    raise
+                attempt += 1
+                delay = self.transient_404_base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "Transient 404 in %s, re-running (attempt %d/%d) in %.1fs",
+                    self.write_mode,
+                    attempt,
+                    self.transient_404_max_retries,
+                    delay,
+                )
+                time.sleep(delay)
+
     # ------------------------------------------------------------------
     # execute
     # ------------------------------------------------------------------
@@ -325,7 +407,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
         hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id, request_timeout=self.request_timeout)
 
         if self.create_sheet_if_missing and self.sheet_name:
-            self._ensure_sheet_exists(hook, self.spreadsheet_id, self.sheet_name)
+            self._run_with_transient_404_retry(
+                lambda: self._ensure_sheet_exists(
+                    hook, self.spreadsheet_id, self.sheet_name
+                )
+            )
 
         headers, rows = self._resolve_data(context)
         rows = self._format_rows(headers, rows)
@@ -366,11 +452,19 @@ class GoogleSheetsWriteOperator(BaseOperator):
                     )
 
         if self.write_mode == "overwrite":
-            return self._execute_overwrite(hook, headers, rows)
+            return self._run_with_transient_404_retry(
+                lambda: self._execute_overwrite(hook, headers, rows)
+            )
         elif self.write_mode == "append":
+            # append is NOT idempotent — a re-run would double-write, so 404
+            # stays fail-fast here (see plan / idempotent-append design).
             return self._execute_append(hook, headers, rows)
         elif self.write_mode in ("merge", "smart_merge"):
-            return self._execute_merge(hook, headers, rows, original_headers=original_headers)
+            return self._run_with_transient_404_retry(
+                lambda: self._execute_merge(
+                    hook, headers, rows, original_headers=original_headers
+                )
+            )
         else:
             raise ValueError(f"Unknown write_mode: '{self.write_mode}'")
 

@@ -2492,6 +2492,79 @@ class TestSortKeysValidation:
 
 
 # ==================================================================
+# transient 404 retry — DAG-load validation of the knobs
+# ==================================================================
+
+
+class TestTransient404RetryValidation:
+    def test_defaults(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+        )
+        assert op.transient_404_max_retries == 3
+        assert op.transient_404_base_delay == 5.0
+
+    def test_max_retries_negative_raises_valueerror(self):
+        with pytest.raises(ValueError, match="transient_404_max_retries must be >= 0"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                transient_404_max_retries=-1,
+            )
+
+    def test_max_retries_bool_raises_typeerror(self):
+        with pytest.raises(TypeError, match="transient_404_max_retries must be a non-bool int"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                transient_404_max_retries=True,
+            )
+
+    def test_max_retries_non_int_raises_typeerror(self):
+        with pytest.raises(TypeError, match="transient_404_max_retries must be a non-bool int"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                transient_404_max_retries=1.5,
+            )
+
+    def test_base_delay_negative_raises_valueerror(self):
+        with pytest.raises(ValueError, match="transient_404_base_delay must be >= 0"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                transient_404_base_delay=-1,
+            )
+
+    def test_base_delay_bool_raises_typeerror(self):
+        with pytest.raises(TypeError, match="transient_404_base_delay must be a non-bool"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                transient_404_base_delay=True,
+            )
+
+    def test_base_delay_non_numeric_raises_typeerror(self):
+        with pytest.raises(TypeError, match="transient_404_base_delay must be a non-bool"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                transient_404_base_delay="5",
+            )
+
+    def test_max_retries_zero_and_int_delay_ok(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            transient_404_max_retries=0,
+            transient_404_base_delay=0,
+        )
+        assert op.transient_404_max_retries == 0
+        assert op.transient_404_base_delay == 0
+
+
+# ==================================================================
 # sort_keys — Task 2: _execute_sort method
 # ==================================================================
 
