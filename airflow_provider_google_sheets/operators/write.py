@@ -675,6 +675,59 @@ class GoogleSheetsWriteOperator(BaseOperator):
             if i + self.batch_size < len(requests):
                 time.sleep(self.pause_between_batches)
 
+    def _execute_sort(
+        self,
+        hook: GoogleSheetsHook,
+        headers: list[str],
+        sheet_id: int,
+        table_start_col: str,
+        table_start_row: int,
+        skip_header: bool,
+        end_row: int,
+    ) -> None:
+        """Server-side sort the written table via a single ``sortRange`` request.
+
+        Args:
+            headers: Table headers (post column_mapping), used to resolve sort
+                columns to absolute dimension indices.
+            sheet_id: Numeric sheet ID.
+            table_start_col: Left-most column letter of the table (e.g. ``"A"``).
+            table_start_row: 1-based row of the table's top edge.
+            skip_header: When ``True``, the first table row is a header and is
+                excluded from the sort range.
+            end_row: 0-based exclusive end row of the sort range (i.e. the total
+                row count from the top of the sheet). The sort never touches rows
+                outside the table.
+        """
+        start_col_idx = self._column_letter_to_index(table_start_col)
+        sort_specs = []
+        for spec in self.sort_keys:
+            col, direction = spec.split(":", 1)
+            col_idx = start_col_idx + headers.index(col.strip())
+            sort_specs.append({
+                "dimensionIndex": col_idx,
+                "sortOrder": "ASCENDING"
+                if direction.strip().lower() == "asc"
+                else "DESCENDING",
+            })
+        data_start = (table_start_row - 1) + (1 if skip_header else 0)
+        # No-op on an empty range: the Google API rejects a sortRange where
+        # startRowIndex >= endRowIndex. Covers empty data / header-only tables.
+        if data_start >= end_row:
+            return
+        hook.batch_update(self.spreadsheet_id, [{
+            "sortRange": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": data_start,
+                    "endRowIndex": end_row,
+                    "startColumnIndex": start_col_idx,
+                    "endColumnIndex": start_col_idx + len(headers),
+                },
+                "sortSpecs": sort_specs,
+            }
+        }])
+
     @staticmethod
     def _column_letter_to_index(letter: str) -> int:
         """Convert an A1-notation column letter to a 0-based index.

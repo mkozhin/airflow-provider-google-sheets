@@ -2452,3 +2452,155 @@ class TestSortKeysValidation:
         )
         with pytest.raises(ValueError, match="requires named headers"):
             op.execute(context)
+
+
+# ==================================================================
+# sort_keys — Task 2: _execute_sort method
+# ==================================================================
+
+
+class TestExecuteSort:
+    def _make_op(self, sort_keys):
+        return GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sort_keys=sort_keys,
+        )
+
+    def test_single_key_descending(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        op._execute_sort(
+            hook,
+            headers=["date", "region", "value"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=False,
+            end_row=10,
+        )
+        hook.batch_update.assert_called_once()
+        requests = hook.batch_update.call_args[0][1]
+        sort_range = requests[0]["sortRange"]
+        specs = sort_range["sortSpecs"]
+        assert len(specs) == 1
+        assert specs[0]["sortOrder"] == "DESCENDING"
+        assert specs[0]["dimensionIndex"] == 0
+        assert sort_range["range"]["endRowIndex"] == 10
+
+    def test_two_keys_order_preserved(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc", "region:asc"])
+        op._execute_sort(
+            hook,
+            headers=["date", "region", "value"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=False,
+            end_row=5,
+        )
+        specs = hook.batch_update.call_args[0][1][0]["sortRange"]["sortSpecs"]
+        assert len(specs) == 2
+        assert specs[0]["dimensionIndex"] == 0
+        assert specs[0]["sortOrder"] == "DESCENDING"
+        assert specs[1]["dimensionIndex"] == 1
+        assert specs[1]["sortOrder"] == "ASCENDING"
+
+    def test_skip_header_true_offsets_start_row(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        op._execute_sort(
+            hook,
+            headers=["date"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=3,
+            skip_header=True,
+            end_row=10,
+        )
+        rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
+        # table_start_row - 1 + 1 = 3
+        assert rng["startRowIndex"] == 3
+
+    def test_skip_header_false_no_offset(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        op._execute_sort(
+            hook,
+            headers=["date"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=3,
+            skip_header=False,
+            end_row=10,
+        )
+        rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
+        # table_start_row - 1 = 2
+        assert rng["startRowIndex"] == 2
+
+    def test_end_row_passed_through(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        op._execute_sort(
+            hook,
+            headers=["date"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=False,
+            end_row=42,
+        )
+        rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
+        assert rng["endRowIndex"] == 42
+
+    def test_table_start_col_c_offsets_indices(self):
+        hook = MagicMock()
+        op = self._make_op(["value:asc"])
+        op._execute_sort(
+            hook,
+            headers=["date", "region", "value"],
+            sheet_id=0,
+            table_start_col="C",
+            table_start_row=1,
+            skip_header=False,
+            end_row=10,
+        )
+        sort_range = hook.batch_update.call_args[0][1][0]["sortRange"]
+        rng = sort_range["range"]
+        # C → index 2
+        assert rng["startColumnIndex"] == 2
+        assert rng["endColumnIndex"] == 2 + 3
+        # "value" is index 2 in headers → 2 + 2 = 4
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 4
+
+    def test_direction_case_insensitive(self):
+        hook = MagicMock()
+        op = self._make_op(["date:ASC", "region:Desc"])
+        op._execute_sort(
+            hook,
+            headers=["date", "region"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=False,
+            end_row=10,
+        )
+        specs = hook.batch_update.call_args[0][1][0]["sortRange"]["sortSpecs"]
+        assert specs[0]["sortOrder"] == "ASCENDING"
+        assert specs[1]["sortOrder"] == "DESCENDING"
+
+    def test_noop_on_empty_range(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        # header-only: skip_header=True, end_row == table_start_row
+        op._execute_sort(
+            hook,
+            headers=["date"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=True,
+            end_row=1,
+        )
+        hook.batch_update.assert_not_called()
