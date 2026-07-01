@@ -337,7 +337,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
                     "list[dict] input)"
                 )
             for spec in self.sort_keys:
-                col = spec.split(":", 1)[0].strip()
+                col = self._parse_sort_spec(spec)[0]
                 if col not in headers:
                     raise ValueError(
                         f"sort_keys column '{col}' not found in headers: {headers}"
@@ -376,6 +376,17 @@ class GoogleSheetsWriteOperator(BaseOperator):
         row_str = "".join(c for c in left if c.isdigit())
         row = int(row_str) if row_str else 1
         return col, row
+
+    @staticmethod
+    def _parse_sort_spec(spec: str) -> tuple[str, str]:
+        """Split a validated ``"column:direction"`` sort spec into normalised parts.
+
+        Returns ``(column, direction)`` with the column stripped and the
+        direction lower-cased. Assumes the spec format was already validated in
+        ``__init__`` (i.e. it contains a ``:`` and a valid direction).
+        """
+        col, direction = spec.split(":", 1)
+        return col.strip(), direction.strip().lower()
 
     def _execute_overwrite(
         self,
@@ -774,6 +785,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         """Server-side sort the written table via a single ``sortRange`` request.
 
         Args:
+            hook: Google Sheets hook used to issue the ``batchUpdate`` request.
             headers: Table headers (post column_mapping), used to resolve sort
                 columns to absolute dimension indices.
             sheet_id: Numeric sheet ID.
@@ -786,15 +798,13 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 outside the table.
         """
         start_col_idx = self._column_letter_to_index(table_start_col)
-        sort_specs = []
+        sort_specs: list[dict] = []
         for spec in self.sort_keys:
-            col, direction = spec.split(":", 1)
-            col_idx = start_col_idx + headers.index(col.strip())
+            col, direction = self._parse_sort_spec(spec)
+            col_idx = start_col_idx + headers.index(col)
             sort_specs.append({
                 "dimensionIndex": col_idx,
-                "sortOrder": "ASCENDING"
-                if direction.strip().lower() == "asc"
-                else "DESCENDING",
+                "sortOrder": "ASCENDING" if direction == "asc" else "DESCENDING",
             })
         data_start = (table_start_row - 1) + (1 if skip_header else 0)
         # No-op on an empty range: the Google API rejects a sortRange where
