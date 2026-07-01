@@ -186,9 +186,16 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 )
             if not sort_keys:
                 raise ValueError("sort_keys must be a non-empty list or None")
-            if write_mode == "overwrite" and clear_mode == "range":
+            # Any clear_mode other than "sheet" performs a partial range clear
+            # in _execute_overwrite (only "sheet" does a full-sheet clear), so
+            # the guard must match that effective behaviour — not just the exact
+            # literal "range". A templated/typo'd value like "RANGE" or "range "
+            # would otherwise bypass this check yet still trigger a range-clear
+            # followed by a sortRange that desyncs neighbouring columns.
+            if write_mode == "overwrite" and clear_mode != "sheet":
                 raise ValueError(
-                    "sort_keys is not compatible with overwrite + clear_mode='range': "
+                    "sort_keys is not compatible with overwrite + a partial "
+                    "range clear (clear_mode != 'sheet', e.g. clear_mode='range'): "
                     "sorting across partial column ranges desyncs neighbouring columns"
                 )
             if self.cell_range and write_mode == "append":
@@ -331,16 +338,19 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # Runtime-only sort_keys checks (format was validated in __init__).
         # Must run after column_mapping so sort_keys reference post-mapping names.
         if self.sort_keys:
-            # Runtime re-check of the overwrite + clear_mode='range' guard.
+            # Runtime re-check of the overwrite + partial-range-clear guard.
             # clear_mode IS a template field, so a Jinja expression can render
-            # to "range" at runtime and bypass the __init__ guard (which runs at
-            # DAG-parse time, before templating). Re-validate here to prevent a
+            # to any value at runtime and bypass the __init__ guard (which runs
+            # at DAG-parse time, before templating). _execute_overwrite treats
+            # ANY clear_mode != "sheet" as a partial range clear, so the guard
+            # must match that (not just the literal "range") to prevent a
             # partial range clear followed by a sortRange that desyncs
             # neighbouring columns. write_mode is not templated, so only
             # clear_mode can change between __init__ and execute().
-            if self.write_mode == "overwrite" and self.clear_mode == "range":
+            if self.write_mode == "overwrite" and self.clear_mode != "sheet":
                 raise ValueError(
-                    "sort_keys is not compatible with overwrite + clear_mode='range': "
+                    "sort_keys is not compatible with overwrite + a partial "
+                    "range clear (clear_mode != 'sheet', e.g. clear_mode='range'): "
                     "sorting across partial column ranges desyncs neighbouring columns"
                 )
             if not headers:
@@ -559,8 +569,14 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 + (1 if header_written_this_run else 0)
                 + len(rows)
             )
-            # Existing on-sheet rows are only read len(headers) wide, so cover
-            # max(len(headers), widest appended row) as the practical fix.
+            # Width contract: the sort range spans the table's declared/written
+            # width — max(len(headers), widest row written this run). Cells to
+            # the RIGHT of that width are intentionally NOT reordered. We cannot
+            # widen to swallow pre-existing on-sheet rows that are wider than the
+            # headers, because an open-width read cannot distinguish same-table
+            # ragged cells from FOREIGN adjacent-column data — reordering foreign
+            # data would be a worse corruption. Headers define the table; rows
+            # that belong to the same table must not exceed the written width.
             num_columns = max(
                 len(headers) if headers else 0,
                 max((len(r) for r in rows), default=0),
@@ -777,8 +793,14 @@ class GoogleSheetsWriteOperator(BaseOperator):
             skip_header = headers_just_written or (
                 bool(existing_keys_raw) and self.has_headers and self.write_headers
             )
-            # Existing on-sheet rows are only read len(headers) wide, so cover
-            # max(len(headers), widest appended row) as the practical fix.
+            # Width contract: the sort range spans the table's declared/written
+            # width — max(len(headers), widest row written this run). Cells to
+            # the RIGHT of that width are intentionally NOT reordered. We cannot
+            # widen to swallow pre-existing on-sheet rows that are wider than the
+            # headers, because an open-width read cannot distinguish same-table
+            # ragged cells from FOREIGN adjacent-column data — reordering foreign
+            # data would be a worse corruption. Headers define the table; rows
+            # that belong to the same table must not exceed the written width.
             num_columns = max(
                 len(headers) if headers else 0,
                 max((len(r) for r in append_rows), default=0),
@@ -849,6 +871,18 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 reordered and desync from the sorted columns. Defaults to
                 ``len(headers)`` when not provided. Sort keys always live within
                 ``headers`` so ``dimensionIndex < endColumnIndex`` still holds.
+
+                Width contract: the sort range spans the table's declared /
+                written width — ``max(len(headers), widest row written this
+                run)``. In append/merge modes, pre-existing on-sheet rows that
+                are wider than that width are intentionally NOT covered: their
+                right-hand cells are left unsorted. This is deliberate. An
+                open-width read of the sheet cannot distinguish same-table
+                ragged cells from FOREIGN data in adjacent columns, so widening
+                the sort range to reach them would risk reordering unrelated
+                neighbouring data — a worse corruption than leaving a few
+                over-wide same-table cells unsorted. Headers define the table;
+                same-table rows must not exceed the written width.
         """
         start_col_idx = self._column_letter_to_index(table_start_col)
         end_col_idx = start_col_idx + (

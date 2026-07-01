@@ -2406,6 +2406,19 @@ class TestSortKeysValidation:
                 sort_keys=["date:desc"],
             )
 
+    def test_sort_keys_overwrite_clear_non_sheet_raises_valueerror(self):
+        # Any clear_mode other than "sheet" does a partial range clear in
+        # _execute_overwrite, so the guard must fire on an arbitrary non-"sheet"
+        # value — not only the exact literal "range".
+        with pytest.raises(ValueError, match="clear_mode != 'sheet'"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="overwrite",
+                clear_mode="partial",
+                sort_keys=["date:desc"],
+            )
+
     def test_sort_keys_append_cell_range_raises_valueerror(self):
         with pytest.raises(ValueError, match=r"append \+ cell_range"):
             GoogleSheetsWriteOperator(
@@ -2770,6 +2783,28 @@ class TestOverwriteSortKeys:
         mock_hook.update_values.assert_not_called()
         assert _find_sort_range(mock_hook) is None
 
+    def test_overwrite_runtime_clear_mode_non_sheet_raises(self, mock_hook, context):
+        """_execute_overwrite treats ANY clear_mode != 'sheet' as a partial
+        range clear, so a templated value like 'RANGE' or 'range ' (not the exact
+        literal 'range') must still be caught in execute() before any write."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            clear_mode="sheet",  # valid at construction time
+            data=[{"date": "2024-01-01", "region": "a"}],
+            sort_keys=["date:desc"],
+        )
+        # Simulate a templated clear_mode rendering to a non-"sheet" value that
+        # still triggers a partial range clear.
+        op.clear_mode = "RANGE"
+        with pytest.raises(ValueError, match="clear_mode != 'sheet'"):
+            op.execute(context)
+        # guard fired before any mutation
+        mock_hook.clear_values.assert_not_called()
+        mock_hook.update_values.assert_not_called()
+        assert _find_sort_range(mock_hook) is None
+
 
 # ==================================================================
 # sort_keys — Task 4: integration into _execute_append
@@ -2805,6 +2840,36 @@ class TestAppendSortKeys:
         assert sort_range["sortSpecs"][0]["sortOrder"] == "DESCENDING"
         # no header re-written on a non-empty sheet
         mock_hook.update_values.assert_not_called()
+
+    def test_append_sort_width_ignores_wider_existing_rows(self, mock_hook, context):
+        """Width contract (Finding B, Option 2): the sort range spans the table's
+        declared/written width — max(len(headers), widest new row) — and does NOT
+        widen to cover pre-existing on-sheet rows that are wider than the headers.
+        Their right-hand cells are intentionally left unsorted, because an
+        open-width read cannot distinguish same-table ragged cells from foreign
+        adjacent-column data and reordering foreign data would be worse."""
+        # Pre-existing rows on the sheet are 3 columns wide, but headers are 2.
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-01", "a", "foreign1"],
+            ["2024-01-02", "b", "foreign2"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-03", "region": "c"}],
+            has_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # Width stays at the declared table width (2), NOT the wider existing row.
+        assert rng["startColumnIndex"] == 0
+        assert rng["endColumnIndex"] == 2
 
     def test_append_empty_sheet_write_headers_sort(self, mock_hook, context):
         """Empty sheet + write_headers=True → header written, skip_header."""
