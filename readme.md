@@ -312,6 +312,19 @@ sorted_merge = GoogleSheetsWriteOperator(
     data=[{"date": "2024-01-03", "value": 200}],
     sort_keys=["date:desc"],   # server-side sortRange after the write
 )
+
+# Sort by two columns: newest dates first, then region A→Z within each date
+multi_sorted = GoogleSheetsWriteOperator(
+    task_id="multi_sorted",
+    spreadsheet_id="your-spreadsheet-id",
+    write_mode="merge",
+    merge_key="date",
+    data=[
+        {"date": "2024-01-03", "region": "EU", "value": 200},
+        {"date": "2024-01-03", "region": "US", "value": 150},
+    ],
+    sort_keys=["date:desc", "region:asc"],   # primary key first, then secondary
+)
 ```
 
 **Parameters:**
