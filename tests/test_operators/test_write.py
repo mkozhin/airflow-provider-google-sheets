@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
+from collections import defaultdict
 from datetime import date
 from unittest.mock import MagicMock, patch, call
 
 import pytest
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from airflow_provider_google_sheets.operators.write import GoogleSheetsWriteOperator
 
@@ -2553,6 +2557,22 @@ class TestTransient404RetryValidation:
                 transient_404_base_delay="5",
             )
 
+    def test_base_delay_nan_raises_valueerror(self):
+        with pytest.raises(ValueError, match="transient_404_base_delay must be finite"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                transient_404_base_delay=float("nan"),
+            )
+
+    def test_base_delay_inf_raises_valueerror(self):
+        with pytest.raises(ValueError, match="transient_404_base_delay must be finite"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                transient_404_base_delay=float("inf"),
+            )
+
     def test_max_retries_zero_and_int_delay_ok(self):
         op = GoogleSheetsWriteOperator(
             task_id="test",
@@ -3474,22 +3494,15 @@ class TestSortKeysEdgeCases:
 # update_values / clear / sortRange, and models the SERIAL_NUMBER date
 # round-trip that merge idempotency depends on.
 
-import re as _re
-from collections import defaultdict as _defaultdict
-from datetime import date as _date
-
-from googleapiclient.errors import HttpError as _HttpError
-from httplib2 import Response as _Response
-
-_SHEETS_EPOCH = _date(1899, 12, 30)
-_ISO_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SHEETS_EPOCH = date(1899, 12, 30)
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _to_serial(value):
     """Model Sheets' SERIAL_NUMBER render option for ISO-date cells."""
     if isinstance(value, str) and _ISO_RE.match(value):
         try:
-            return (_date.fromisoformat(value) - _SHEETS_EPOCH).days
+            return (date.fromisoformat(value) - _SHEETS_EPOCH).days
         except ValueError:
             return value
     return value
@@ -3625,10 +3638,9 @@ class FakeSheet:
             )
         self.grid[start_row:end_row] = block
 
-    def data_rows(self, skip_header=True):
-        """Return grid rows (optionally skipping the header) for assertions."""
-        rows = self.grid[1:] if skip_header else self.grid
-        return [list(r) for r in rows]
+    def data_rows(self):
+        """Return grid rows (skipping the header) for assertions."""
+        return [list(r) for r in self.grid[1:]]
 
 
 class FakeSheetsHook:
@@ -3641,8 +3653,8 @@ class FakeSheetsHook:
 
     def __init__(self, sheet):
         self.sheet = sheet
-        self._counts = _defaultdict(int)
-        self._faults = _defaultdict(list)
+        self._counts = defaultdict(int)
+        self._faults = defaultdict(list)
 
     # -- fault injection --------------------------------------------------
     def fail_once(self, op, status=404, when="after", occurrence=1):
@@ -3658,7 +3670,7 @@ class FakeSheetsHook:
         for f in self._faults[op]:
             if not f["fired"] and f["occurrence"] == count and f["when"] == phase:
                 f["fired"] = True
-                raise _HttpError(_Response({"status": f["status"]}), b"boom")
+                raise HttpError(Response({"status": f["status"]}), b"boom")
 
     # -- metadata ---------------------------------------------------------
     def get_spreadsheet_metadata(self, spreadsheet_id):
@@ -3845,6 +3857,39 @@ class TestTransient404IdempotencyMerge:
             ["2026-01-15", "new-B"],
         ]
 
+    def test_merge_404_same_step_twice_then_succeeds_final_grid(self, context):
+        """The same step 404s on run 1 AND run 2, succeeding only on run 3 →
+        final grid is still correct (multi-retry converges, no dupes/loss)."""
+        sheet = FakeSheet(
+            grid=[
+                ["date", "value"],
+                ["2026-01-14", "old-A"],
+                ["2026-01-15", "old-B"],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        # append_values runs every attempt (2026-01-15 is always re-appended);
+        # fail it (before the mutation) on the first two runs, succeed on the 3rd.
+        hook.fail_once("append_values", status=404, when="before", occurrence=1)
+        hook.fail_once("append_values", status=404, when="before", occurrence=2)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[{"date": "2026-01-15", "value": "new-B"}],
+            pause_between_batches=0,
+            transient_404_max_retries=3,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert sheet.data_rows() == [
+            ["2026-01-14", "old-A"],
+            ["2026-01-15", "new-B"],
+        ]
+
     def test_merge_sort_tail_404_reruns_sorted_no_dupes(self, context):
         """404 on the sort tail → re-run → sorted, no dupes."""
         sheet = FakeSheet(
@@ -3897,6 +3942,44 @@ class TestTransient404IdempotencyOverwrite:
             task_id="t",
             spreadsheet_id=SPREADSHEET_ID,
             write_mode="overwrite",
+            data=[
+                {"name": "Al", "n": 1},
+                {"name": "Bo", "n": 2},
+                {"name": "Cy", "n": 3},
+            ],
+            batch_size=1,
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert sheet.grid == [
+            ["name", "n"],
+            ["Al", 1],
+            ["Bo", 2],
+            ["Cy", 3],
+        ]
+
+    def test_overwrite_clear_mode_range_404_mid_write_reruns_no_dupes(self, context):
+        """clear_mode='range' (partial data-column clear, no trim) is idempotent:
+        a mid-write 404 → re-clear the range + rewrite → the new rows only."""
+        sheet = FakeSheet(
+            grid=[
+                ["name", "n"],
+                ["stale-1", 91],
+                ["stale-2", 92],
+                ["stale-3", 93],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        # header + 3 rows @ batch_size=1 -> 4 update_values calls; fail after #3
+        hook.fail_once("update_values", status=404, when="after", occurrence=3)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            clear_mode="range",
             data=[
                 {"name": "Al", "n": 1},
                 {"name": "Bo", "n": 2},
@@ -4000,7 +4083,7 @@ _SLEEP_PATH = "airflow_provider_google_sheets.operators.write.time.sleep"
 
 
 def _http_error(status):
-    return _HttpError(_Response({"status": status}), b"boom")
+    return HttpError(Response({"status": status}), b"boom")
 
 
 class TestTransient404FailFast:
@@ -4016,7 +4099,7 @@ class TestTransient404FailFast:
             transient_404_base_delay=0,
         )
         with patch(_SLEEP_PATH) as sleep:
-            with pytest.raises(_HttpError) as ei:
+            with pytest.raises(HttpError) as ei:
                 op.execute(context)
         assert ei.value.resp.status == 403
         sleep.assert_not_called()
@@ -4036,7 +4119,7 @@ class TestTransient404FailFast:
             transient_404_base_delay=0,
         )
         with patch(_SLEEP_PATH) as sleep:
-            with pytest.raises(_HttpError) as ei:
+            with pytest.raises(HttpError) as ei:
                 op.execute(context)
         assert ei.value.resp.status == 400
         sleep.assert_not_called()
@@ -4055,7 +4138,7 @@ class TestTransient404FailFast:
             transient_404_base_delay=0,
         )
         with patch(_SLEEP_PATH):
-            with pytest.raises(_HttpError) as ei:
+            with pytest.raises(HttpError) as ei:
                 op.execute(context)
         assert ei.value.resp.status == 404
         # 1 initial attempt + 2 retries = 3 runs, then gives up (not infinite)
@@ -4076,7 +4159,7 @@ class TestTransient404FailFast:
             transient_404_base_delay=0,
         )
         with patch(_SLEEP_PATH):
-            with pytest.raises(_HttpError) as ei:
+            with pytest.raises(HttpError) as ei:
                 op.execute(context)
         assert ei.value.resp.status == 404
         assert mock_hook.append_values.call_count == 3  # 1 + 2 retries, bounded
@@ -4094,11 +4177,30 @@ class TestTransient404FailFast:
             transient_404_base_delay=0,
         )
         with patch(_SLEEP_PATH) as sleep:
-            with pytest.raises(_HttpError) as ei:
+            with pytest.raises(HttpError) as ei:
                 op.execute(context)
         assert ei.value.resp.status == 404
         sleep.assert_not_called()
         assert mock_hook.clear_values.call_count == 1  # exactly one attempt
+
+    def test_backoff_delay_sequence_is_exponential(self, mock_hook, context):
+        """The re-run backoff follows base_delay * 2**(attempt-1): with
+        base_delay=5 and max_retries=2 a persistent 404 sleeps 5s then 10s."""
+        mock_hook.clear_values.side_effect = _http_error(404)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"a": 1}],
+            pause_between_batches=0,
+            transient_404_max_retries=2,
+            transient_404_base_delay=5,
+        )
+        with patch(_SLEEP_PATH) as sleep:
+            with pytest.raises(HttpError) as ei:
+                op.execute(context)
+        assert ei.value.resp.status == 404
+        assert sleep.call_args_list == [call(5.0), call(10.0)]
 
     def test_append_404_fails_fast_no_retry(self, mock_hook, context):
         """append is NOT wrapped: a 404 raises immediately even with retries set."""
@@ -4115,7 +4217,7 @@ class TestTransient404FailFast:
             transient_404_base_delay=0,
         )
         with patch(_SLEEP_PATH) as sleep:
-            with pytest.raises(_HttpError) as ei:
+            with pytest.raises(HttpError) as ei:
                 op.execute(context)
         assert ei.value.resp.status == 404
         sleep.assert_not_called()

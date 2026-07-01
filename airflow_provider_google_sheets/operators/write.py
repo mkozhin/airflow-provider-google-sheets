@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections import defaultdict
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from airflow.models import BaseOperator
 
@@ -116,9 +117,13 @@ class GoogleSheetsWriteOperator(BaseOperator):
             ``base_delay * 2 ** (attempt - 1)``).  Must be a non-bool
             real (``int``/``float``) ``>= 0``.  Defaults to ``5.0``.
 
-            Worst-case wall time: with the defaults, up to ``1 + 3 = 4`` full
-            re-runs of the operation with ``5 + 10 + 20 = 35`` seconds of
-            backoff between them, each call bounded by ``request_timeout``.
+            Worst-case wall time: with the defaults, 1 initial run plus up to
+            3 re-runs (4 runs of the operation total) with ``5 + 10 + 20 = 35``
+            seconds of backoff between them, each call bounded by
+            ``request_timeout``.  When ``create_sheet_if_missing`` is set, the
+            ensure-sheet setup is wrapped in its own separate retry budget, so
+            backoff can occur once there and again during the write — roughly
+            doubling the worst case (add another ~35s of backoff).
             Re-running a large write can take minutes but is safe (the modes are
             idempotent on full re-run).  Keep the Airflow ``execution_timeout``
             comfortably above this.
@@ -225,6 +230,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
         if transient_404_base_delay < 0:
             raise ValueError(
                 "transient_404_base_delay must be >= 0, got "
+                f"{transient_404_base_delay}"
+            )
+        if not math.isfinite(transient_404_base_delay):
+            raise ValueError(
+                "transient_404_base_delay must be finite, got "
                 f"{transient_404_base_delay}"
             )
 
@@ -369,7 +379,9 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 else:
                     raise
 
-    def _run_with_transient_404_retry(self, fn: Any) -> Any:
+    def _run_with_transient_404_retry(
+        self, fn: Callable[[], Any], label: str
+    ) -> Any:
         """Run *fn*, re-running the whole call on a transient Google 404.
 
         Only ``404`` is retried (the observed transient failure on an existing
@@ -377,6 +389,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
         once ``transient_404_max_retries`` re-runs are exhausted — is re-raised
         immediately. Used only to wrap the idempotent operations
         (overwrite / merge / ensure-sheet); ``append`` is never wrapped.
+
+        *label* names the wrapped operation (e.g. ``"overwrite"`` or
+        ``"ensure_sheet"``) for the retry log — it is logged instead of
+        ``self.write_mode`` because the ensure-sheet wrap runs for *all* modes,
+        including ``append``, so ``self.write_mode`` would be misleading there.
         """
         attempt = 0
         while True:
@@ -392,7 +409,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 delay = self.transient_404_base_delay * (2 ** (attempt - 1))
                 logger.warning(
                     "Transient 404 in %s, re-running (attempt %d/%d) in %.1fs",
-                    self.write_mode,
+                    label,
                     attempt,
                     self.transient_404_max_retries,
                     delay,
@@ -410,7 +427,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
             self._run_with_transient_404_retry(
                 lambda: self._ensure_sheet_exists(
                     hook, self.spreadsheet_id, self.sheet_name
-                )
+                ),
+                label="ensure_sheet",
             )
 
         headers, rows = self._resolve_data(context)
@@ -453,7 +471,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
 
         if self.write_mode == "overwrite":
             return self._run_with_transient_404_retry(
-                lambda: self._execute_overwrite(hook, headers, rows)
+                lambda: self._execute_overwrite(hook, headers, rows),
+                label="overwrite",
             )
         elif self.write_mode == "append":
             # append is NOT idempotent — a re-run would double-write, so 404
@@ -463,7 +482,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
             return self._run_with_transient_404_retry(
                 lambda: self._execute_merge(
                     hook, headers, rows, original_headers=original_headers
-                )
+                ),
+                label="merge",
             )
         else:
             raise ValueError(f"Unknown write_mode: '{self.write_mode}'")

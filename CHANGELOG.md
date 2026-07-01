@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- **Transient `404` from the Google Sheets API** (a `404` on a spreadsheet that really exists, observed after heavy writes) no longer fails the task in the idempotent write modes. `GoogleSheetsWriteOperator` now re-runs the whole operation on a transient 404 for `merge`/`overwrite` and for `create_sheet_if_missing` setup (all idempotent on full re-run). The `append` mode and the read methods remain fail-fast (append is not idempotent; a wrong `spreadsheet_id` still fails instantly). Controlled by two new operator params: `transient_404_max_retries` (default `3`, `0` disables) and `transient_404_base_delay` (default `5.0`s, exponential backoff). A non-404 `HttpError` is re-raised immediately
+- **Transient `404` from the Google Sheets API** (a `404` on a spreadsheet that really exists, observed after heavy writes) no longer fails the task in the idempotent write modes. `GoogleSheetsWriteOperator` now re-runs the whole operation on a transient 404 for `merge`/`overwrite` and for `create_sheet_if_missing` setup (all idempotent on full re-run). The `append` mode and the read methods remain fail-fast (append is not idempotent; append data writes and the read methods still fail fast on a wrong `spreadsheet_id`, so it fails instantly — the `create_sheet_if_missing` setup step is the one append-mode path that shares the retry wrapper. On `overwrite`/`merge` a persistent 404 is now retried for ~35s before failing). Controlled by two new operator params: `transient_404_max_retries` (default `3`, `0` disables) and `transient_404_base_delay` (default `5.0`s, exponential backoff). A non-404 `HttpError` is re-raised immediately
 
 
 ## v0.12.0
