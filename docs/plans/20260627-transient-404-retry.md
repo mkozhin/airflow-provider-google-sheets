@@ -182,12 +182,12 @@ fail-fast (append вне scope).
 **Files:** Modify `tests/test_operators/test_write.py`,
 `tests/test_hooks/test_google_sheets.py`
 
-- [ ] wrapper: **не-404 `HttpError`** (`403`/`400`) в merge/overwrite → пробрасывается сразу, `time.sleep` НЕ вызывается
-- [ ] merge/overwrite: 404 не исчезает за `transient_404_max_retries` → падает (не бесконечно)
-- [ ] `transient_404_max_retries=0` → 404 пробрасывается без повторов
-- [ ] **append не тронут:** append + 404 → падает мгновенно, без ретраев (фиксируем неизменённое поведение)
-- [ ] **hook-level fail-fast** (в `tests/test_hooks/test_google_sheets.py`, реальный декоратор, не мок): `get_values` / `get_spreadsheet_metadata` + 404 → НЕ ретраит, `time.sleep` не вызывается (регресс-гард на случай будущего 404-retry в хуках)
-- [ ] прогнать тесты — должны пройти
+- [x] wrapper: **не-404 `HttpError`** (`403`/`400`) в merge/overwrite → пробрасывается сразу, `time.sleep` НЕ вызывается
+- [x] merge/overwrite: 404 не исчезает за `transient_404_max_retries` → падает (не бесконечно)
+- [x] `transient_404_max_retries=0` → 404 пробрасывается без повторов
+- [x] **append не тронут:** append + 404 → падает мгновенно, без ретраев (фиксируем неизменённое поведение)
+- [x] **hook-level fail-fast** (в `tests/test_hooks/test_google_sheets.py`, реальный декоратор, не мок): `get_values` / `get_spreadsheet_metadata` + 404 → НЕ ретраит, `time.sleep` не вызывается (регресс-гард на случай будущего 404-retry в хуках)
+- [x] прогнать тесты — должны пройти
 
 ### Task 4: Finalization (checklist, не implementation-task)
 

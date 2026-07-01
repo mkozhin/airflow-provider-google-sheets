@@ -3986,3 +3986,137 @@ class TestTransient404EnsureSheet:
         _run_with_fake(hook, op, context)
 
         assert "Feb" in sheet.titles
+
+
+# ==================================================================
+# Task 3 — fail-fast: non-404 propagates, 404 is bounded, append untouched
+# ==================================================================
+#
+# These assert the *negative* half of the 404 contract: only 404 is retried,
+# only for the idempotent wrapped operations, and only up to
+# ``transient_404_max_retries`` times. ``append`` is never wrapped.
+
+_SLEEP_PATH = "airflow_provider_google_sheets.operators.write.time.sleep"
+
+
+def _http_error(status):
+    return _HttpError(_Response({"status": status}), b"boom")
+
+
+class TestTransient404FailFast:
+    def test_non_404_403_in_overwrite_propagates_immediately(self, mock_hook, context):
+        """A 403 inside the wrapped overwrite is re-raised at once, no sleep."""
+        mock_hook.clear_values.side_effect = _http_error(403)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"a": 1}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        with patch(_SLEEP_PATH) as sleep:
+            with pytest.raises(_HttpError) as ei:
+                op.execute(context)
+        assert ei.value.resp.status == 403
+        sleep.assert_not_called()
+        assert mock_hook.clear_values.call_count == 1  # no re-run
+
+    def test_non_404_400_in_merge_propagates_immediately(self, mock_hook, context):
+        """A 400 inside the wrapped merge is re-raised at once, no sleep."""
+        mock_hook.get_values.return_value = [["date"], ["2024-01-01"]]
+        mock_hook.append_values.side_effect = _http_error(400)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[{"date": "2024-01-02", "val": "x"}],  # new key -> append
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        with patch(_SLEEP_PATH) as sleep:
+            with pytest.raises(_HttpError) as ei:
+                op.execute(context)
+        assert ei.value.resp.status == 400
+        sleep.assert_not_called()
+        assert mock_hook.append_values.call_count == 1  # no re-run
+
+    def test_persistent_404_overwrite_raises_after_max_retries(self, mock_hook, context):
+        """A 404 that never clears raises after a bounded number of re-runs."""
+        mock_hook.clear_values.side_effect = _http_error(404)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"a": 1}],
+            pause_between_batches=0,
+            transient_404_max_retries=2,
+            transient_404_base_delay=0,
+        )
+        with patch(_SLEEP_PATH):
+            with pytest.raises(_HttpError) as ei:
+                op.execute(context)
+        assert ei.value.resp.status == 404
+        # 1 initial attempt + 2 retries = 3 runs, then gives up (not infinite)
+        assert mock_hook.clear_values.call_count == 3
+
+    def test_persistent_404_merge_raises_after_max_retries(self, mock_hook, context):
+        """Merge 404 that never clears is bounded by transient_404_max_retries."""
+        mock_hook.get_values.return_value = [["date"], ["2024-01-01"]]
+        mock_hook.append_values.side_effect = _http_error(404)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[{"date": "2024-01-02", "val": "x"}],  # new key -> append
+            pause_between_batches=0,
+            transient_404_max_retries=2,
+            transient_404_base_delay=0,
+        )
+        with patch(_SLEEP_PATH):
+            with pytest.raises(_HttpError) as ei:
+                op.execute(context)
+        assert ei.value.resp.status == 404
+        assert mock_hook.append_values.call_count == 3  # 1 + 2 retries, bounded
+
+    def test_max_retries_zero_404_propagates_without_retry(self, mock_hook, context):
+        """transient_404_max_retries=0 → 404 propagates with zero re-runs."""
+        mock_hook.clear_values.side_effect = _http_error(404)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"a": 1}],
+            pause_between_batches=0,
+            transient_404_max_retries=0,
+            transient_404_base_delay=0,
+        )
+        with patch(_SLEEP_PATH) as sleep:
+            with pytest.raises(_HttpError) as ei:
+                op.execute(context)
+        assert ei.value.resp.status == 404
+        sleep.assert_not_called()
+        assert mock_hook.clear_values.call_count == 1  # exactly one attempt
+
+    def test_append_404_fails_fast_no_retry(self, mock_hook, context):
+        """append is NOT wrapped: a 404 raises immediately even with retries set."""
+        mock_hook.get_values.return_value = [["a"]]  # non-empty -> no header write
+        mock_hook.append_values.side_effect = _http_error(404)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1}],
+            write_headers=False,
+            pause_between_batches=0,
+            transient_404_max_retries=3,
+            transient_404_base_delay=0,
+        )
+        with patch(_SLEEP_PATH) as sleep:
+            with pytest.raises(_HttpError) as ei:
+                op.execute(context)
+        assert ei.value.resp.status == 404
+        sleep.assert_not_called()
+        assert mock_hook.append_values.call_count == 1  # no operation-level retry

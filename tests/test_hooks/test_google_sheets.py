@@ -4,6 +4,9 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
+from googleapiclient.errors import HttpError
+from httplib2 import Response
+
 from airflow_provider_google_sheets.exceptions import GoogleSheetsAuthError, GoogleSheetsAPIError
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 
@@ -202,6 +205,45 @@ class TestGetSpreadsheetMetadata:
 
         result = hook.get_spreadsheet_metadata(SPREADSHEET_ID)
         assert result == meta
+
+
+class TestHookFailFastOn404:
+    """404 is absent from DEFAULT_RETRYABLE_STATUS_CODES=(429,500,503), so the
+    real @retry_with_backoff decorator must raise it immediately without any
+    backoff. This is a regression guard: read methods stay fail-fast, keeping a
+    wrong spreadsheet_id from hanging ~35s before failing.
+    """
+
+    def test_get_values_404_does_not_retry(self, hook, mock_service):
+        err = HttpError(Response({"status": 404}), b"not found")
+        get_execute = mock_service.spreadsheets().values().get().execute
+        get_execute.side_effect = err
+
+        with patch(
+            "airflow_provider_google_sheets.utils.retry.time.sleep"
+        ) as sleep:
+            with pytest.raises(HttpError) as ei:
+                hook.get_values(SPREADSHEET_ID, RANGE)
+
+        assert ei.value.resp.status == 404
+        sleep.assert_not_called()
+        # exactly one underlying call — no retry loop
+        assert get_execute.call_count == 1
+
+    def test_get_spreadsheet_metadata_404_does_not_retry(self, hook, mock_service):
+        err = HttpError(Response({"status": 404}), b"not found")
+        get_execute = mock_service.spreadsheets().get().execute
+        get_execute.side_effect = err
+
+        with patch(
+            "airflow_provider_google_sheets.utils.retry.time.sleep"
+        ) as sleep:
+            with pytest.raises(HttpError) as ei:
+                hook.get_spreadsheet_metadata(SPREADSHEET_ID)
+
+        assert ei.value.resp.status == 404
+        sleep.assert_not_called()
+        assert get_execute.call_count == 1
 
 
 class TestGetSheetId:
