@@ -2320,6 +2320,26 @@ class TestSortKeysValidation:
         )
         assert op.sort_keys is None
 
+    def test_sort_keys_whitespace_padded_spec(self, mock_hook, context):
+        """A padded spec 'date : desc' is accepted at init and resolves to the
+        correct column and direction at execute()-time (both sides stripped)."""
+        # init must not raise on the padded spec
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            sort_keys=["date : desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        # column resolved despite surrounding spaces → header index 0
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+        # direction resolved despite spaces
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "DESCENDING"
+
     def test_sort_keys_not_list_raises_typeerror(self):
         with pytest.raises(TypeError, match="sort_keys must be a list"):
             GoogleSheetsWriteOperator(
@@ -2818,6 +2838,69 @@ class TestAppendSortKeys:
         assert check_range.endswith("A1")
         assert ":" not in check_range
 
+    def test_append_table_start_c3_column_and_row_offset(self, mock_hook, context):
+        """table_start='C3': the (start_row-1) row offset, full-width read range,
+        and column-offset indices must all be derived from C3, not A1."""
+        # header + 2 data rows at the full width starting from C3
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-01", "a"],
+            ["2024-01-02", "b"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            table_start="C3",
+            data=[{"date": "2024-01-03", "region": "c"}],
+            has_headers=True,
+            sort_keys=["region:asc"],
+        )
+        op.execute(context)
+
+        # full-width read range anchored at C3, spanning C..D
+        read_range = mock_hook.get_values.call_args[0][1]
+        assert read_range.endswith("C3:D")
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # start_row=3, existing 3 rows + 1 new = 4 → end_row = (3-1) + 3 + 1 = 6
+        assert rng["endRowIndex"] == 6
+        # header present + row offset: data_start = (3-1) + 1 = 3
+        assert rng["startRowIndex"] == 3
+        # column offset: table starts at C (index 2)
+        assert rng["startColumnIndex"] == 2
+        assert rng["endColumnIndex"] == 4  # 2 + len(["date","region"])
+        # "region" is header index 1 → absolute dimensionIndex 2 + 1 = 3
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 3
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "ASCENDING"
+
+    def test_append_multi_key_sort_execute(self, mock_hook, context):
+        """execute()-level multi-key sort keeps spec order and directions."""
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-01", "a"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-02", "region": "b"}],
+            has_headers=True,
+            sort_keys=["date:desc", "region:asc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        specs = sort_range["sortSpecs"]
+        assert len(specs) == 2
+        assert specs[0]["dimensionIndex"] == 0  # date
+        assert specs[0]["sortOrder"] == "DESCENDING"
+        assert specs[1]["dimensionIndex"] == 1  # region
+        assert specs[1]["sortOrder"] == "ASCENDING"
+
 
 # ==================================================================
 # sort_keys — Task 5: integration into _execute_merge
@@ -2943,6 +3026,65 @@ class TestMergeSortKeys:
         # nothing existed, 1 appended, no header written
         assert rng["endRowIndex"] == 1
         assert rng["startRowIndex"] == 0
+
+    def test_merge_has_headers_false_nonempty_includes_first_row(self, mock_hook, context):
+        """has_headers=False + non-empty sheet: list[dict] input sets headers so
+        sort_keys passes the execute() guard, but the sheet has NO header row.
+        The first data row must be included in the sort range (startRowIndex=0)."""
+        # Two existing DATA rows, no header row (has_headers=False).
+        mock_hook.get_values.return_value = [["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            # list[dict] populates headers regardless of has_headers
+            data=[{"id": "C", "val": "x"}],
+            has_headers=False,
+            write_headers=False,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 2 data rows + 1 appended (new key C) = 3
+        assert rng["endRowIndex"] == 3
+        # no physical header row → first data row IS included in the sort
+        assert rng["startRowIndex"] == 0
+
+    def test_merge_empty_sheet_write_headers_sort(self, mock_hook, context):
+        """Empty sheet + write_headers=True: headers_just_written drives
+        total_existing, end_row and skip_header. Header written, first data row
+        skipped, end_row == 1 header + len(rows)."""
+        mock_hook.get_values.return_value = []  # empty sheet
+        rows_data = [{"id": "A", "val": "x"}, {"id": "B", "val": "y"}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=rows_data,
+            has_headers=True,
+            write_headers=True,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        op.execute(context)
+
+        # header row was physically written to the empty sheet
+        mock_hook.update_values.assert_called_once()
+        written = mock_hook.update_values.call_args[0][2]
+        assert written == [["id", "val"]]
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # start_row=1 (table_start A1) → data_start = (1-1) + 1(skip header) = 1
+        assert rng["startRowIndex"] == 1  # == table_start_row
+        assert rng["endRowIndex"] == 1 + len(rows_data)
 
 
 # ==================================================================

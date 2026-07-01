@@ -719,9 +719,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
         if self.sort_keys:
             rows_after_merge = total_existing - total_deleted + len(append_rows)
             end_row = (table_start_row - 1) + rows_after_merge
-            # Header is present in the sheet if it was already there
-            # (existing_keys_raw non-empty) or was just written this run.
-            skip_header = bool(existing_keys_raw) or headers_just_written
+            # A physical header row exists only if we just wrote one, or the
+            # sheet already had data AND the table is declared to have headers.
+            # `has_headers=False` (reachable via list[dict] input, which sets
+            # `headers` so sort_keys passes the execute() guard while the sheet
+            # itself has no header row) must NOT skip the first data row.
+            # Mirrors the append path (existing_row_count > 0 and has_headers).
+            skip_header = headers_just_written or (
+                bool(existing_keys_raw) and self.has_headers
+            )
             self._execute_sort(
                 hook,
                 headers,
