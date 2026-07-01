@@ -1,6 +1,13 @@
 # Changelog
 
 
+## [Unreleased]
+
+### Added
+
+- **`sort_keys`** parameter to `GoogleSheetsWriteOperator` (default `None`) — optional list of sort specs applied server-side via a single `sortRange` `batchUpdate` after the write completes, in any write mode. Each item is `"column:asc"` or `"column:desc"` (direction case-insensitive), e.g. `sort_keys=["date:desc", "region:asc"]`. Column names refer to the headers **after** `column_mapping`. Requires named headers and only sorts the table's own columns. Format is validated at DAG-load time. Not compatible with `overwrite` + `clear_mode="range"` or with `append` + `cell_range`
+
+
 ## v0.12.0
 
 - **Internal:** merge-key normalization (`normalize_merge_key`, `infer_date_key_schema`) moved from `utils/schema.py` to a new `utils/merge_key.py` module — pure refactor, no functional behavior change, except: merge-key warning/info logs now use logger `airflow_provider_google_sheets.utils.merge_key` instead of `airflow_provider_google_sheets.utils.schema`. This is technically observable to callers that filter logs by logger name

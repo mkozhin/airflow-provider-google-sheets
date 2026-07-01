@@ -2295,3 +2295,1097 @@ class TestRequestTimeout:
             )
             op.execute(context)
             hook_cls.assert_called_once_with(gcp_conn_id="google_cloud_default", request_timeout=None)
+
+
+# ==================================================================
+# sort_keys — Task 1: validation in __init__ and execute
+# ==================================================================
+
+
+class TestSortKeysValidation:
+    def test_valid_sort_keys_init(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            sort_keys=["date:desc"],
+        )
+        assert op.sort_keys == ["date:desc"]
+
+    def test_sort_keys_default_none(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+        )
+        assert op.sort_keys is None
+
+    def test_sort_keys_whitespace_padded_spec(self, mock_hook, context):
+        """A padded spec 'date : desc' is accepted at init and resolves to the
+        correct column and direction at execute()-time (both sides stripped)."""
+        # init must not raise on the padded spec
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            sort_keys=["date : desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        # column resolved despite surrounding spaces → header index 0
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+        # direction resolved despite spaces
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "DESCENDING"
+
+    def test_sort_keys_not_list_raises_typeerror(self):
+        with pytest.raises(TypeError, match="sort_keys must be a list"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys="date:desc",
+            )
+
+    def test_sort_keys_non_string_item_raises_typeerror(self):
+        with pytest.raises(TypeError, match="sort_keys item must be a string"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=[123],
+            )
+
+    def test_sort_keys_empty_list_raises_valueerror(self):
+        with pytest.raises(ValueError, match="non-empty list or None"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=[],
+            )
+
+    def test_sort_keys_duplicate_column_raises_valueerror(self):
+        with pytest.raises(ValueError, match="specified more than once"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=["date:asc", "date:desc"],
+            )
+
+    def test_sort_keys_missing_colon_raises_valueerror(self):
+        with pytest.raises(ValueError, match="must be 'column:asc' or 'column:desc'"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=["date"],
+            )
+
+    def test_sort_keys_bad_direction_raises_valueerror(self):
+        with pytest.raises(ValueError, match="direction must be 'asc' or 'desc'"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=["date:ascending"],
+            )
+
+    def test_sort_keys_empty_column_raises_valueerror(self):
+        with pytest.raises(ValueError, match="column name is empty"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=[":desc"],
+            )
+
+    def test_sort_keys_overwrite_clear_range_raises_valueerror(self):
+        with pytest.raises(ValueError, match="clear_mode='range'"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="overwrite",
+                clear_mode="range",
+                sort_keys=["date:desc"],
+            )
+
+    def test_sort_keys_overwrite_clear_non_sheet_raises_valueerror(self, mock_hook, context):
+        # The __init__ guard only raises on the exact literal "range" (to avoid
+        # false positives on templated clear_mode values that are non-"sheet"
+        # literals at DAG-parse time). Enforcement for an arbitrary non-"sheet"
+        # value happens at the execute() runtime guard, which runs after Jinja
+        # rendering and treats ANY clear_mode != "sheet" as a partial range clear.
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            clear_mode="partial",  # non-"sheet" literal: allowed at construction
+            data=[{"date": "2024-01-01", "region": "a"}],
+            sort_keys=["date:desc"],
+        )
+        with pytest.raises(ValueError, match="clear_mode != 'sheet'"):
+            op.execute(context)
+
+    def test_sort_keys_append_cell_range_raises_valueerror(self):
+        with pytest.raises(ValueError, match=r"append \+ cell_range"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="append",
+                cell_range="B2",
+                sort_keys=["date:desc"],
+            )
+
+    def test_sort_keys_append_clear_range_ok(self):
+        # clear_mode is ignored in append; must not raise
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            clear_mode="range",
+            sort_keys=["date:desc"],
+        )
+        assert op.sort_keys == ["date:desc"]
+
+    def test_sort_keys_direction_case_insensitive_init(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sort_keys=["date:DESC", "region:Asc"],
+        )
+        assert op.sort_keys == ["date:DESC", "region:Asc"]
+
+    def test_sort_keys_unknown_column_raises_in_execute(self, mock_hook, context):
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"name": "a", "value": 1}],
+            sort_keys=["missing:desc"],
+        )
+        with pytest.raises(ValueError, match="not found in headers"):
+            op.execute(context)
+
+    def test_sort_keys_column_mapping_name_ok_in_execute(self, mock_hook, context):
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"src": "2024-01-01"}],
+            column_mapping={"src": "date"},
+            sort_keys=["date:desc"],
+        )
+        # Post-mapping name "date" exists → no error
+        op.execute(context)
+
+    def test_sort_keys_requires_headers_raises_in_execute(self, mock_hook, context):
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[["a", "b"]],
+            has_headers=False,
+            sort_keys=["date:desc"],
+        )
+        with pytest.raises(ValueError, match="requires named headers"):
+            op.execute(context)
+
+
+# ==================================================================
+# sort_keys — Task 2: _execute_sort method
+# ==================================================================
+
+
+class TestExecuteSort:
+    def _make_op(self, sort_keys):
+        return GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sort_keys=sort_keys,
+        )
+
+    def test_single_key_descending(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        op._execute_sort(
+            hook,
+            headers=["date", "region", "value"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=False,
+            end_row=10,
+        )
+        hook.batch_update.assert_called_once()
+        requests = hook.batch_update.call_args[0][1]
+        sort_range = requests[0]["sortRange"]
+        specs = sort_range["sortSpecs"]
+        assert len(specs) == 1
+        assert specs[0]["sortOrder"] == "DESCENDING"
+        assert specs[0]["dimensionIndex"] == 0
+        assert sort_range["range"]["endRowIndex"] == 10
+
+    def test_two_keys_order_preserved(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc", "region:asc"])
+        op._execute_sort(
+            hook,
+            headers=["date", "region", "value"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=False,
+            end_row=5,
+        )
+        specs = hook.batch_update.call_args[0][1][0]["sortRange"]["sortSpecs"]
+        assert len(specs) == 2
+        assert specs[0]["dimensionIndex"] == 0
+        assert specs[0]["sortOrder"] == "DESCENDING"
+        assert specs[1]["dimensionIndex"] == 1
+        assert specs[1]["sortOrder"] == "ASCENDING"
+
+    def test_skip_header_true_offsets_start_row(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        op._execute_sort(
+            hook,
+            headers=["date"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=3,
+            skip_header=True,
+            end_row=10,
+        )
+        rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
+        # table_start_row - 1 + 1 = 3
+        assert rng["startRowIndex"] == 3
+
+    def test_skip_header_false_no_offset(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        op._execute_sort(
+            hook,
+            headers=["date"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=3,
+            skip_header=False,
+            end_row=10,
+        )
+        rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
+        # table_start_row - 1 = 2
+        assert rng["startRowIndex"] == 2
+
+    def test_end_row_passed_through(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        op._execute_sort(
+            hook,
+            headers=["date"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=False,
+            end_row=42,
+        )
+        rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
+        assert rng["endRowIndex"] == 42
+
+    def test_table_start_col_c_offsets_indices(self):
+        hook = MagicMock()
+        op = self._make_op(["value:asc"])
+        op._execute_sort(
+            hook,
+            headers=["date", "region", "value"],
+            sheet_id=0,
+            table_start_col="C",
+            table_start_row=1,
+            skip_header=False,
+            end_row=10,
+        )
+        sort_range = hook.batch_update.call_args[0][1][0]["sortRange"]
+        rng = sort_range["range"]
+        # C → index 2
+        assert rng["startColumnIndex"] == 2
+        assert rng["endColumnIndex"] == 2 + 3
+        # "value" is index 2 in headers → 2 + 2 = 4
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 4
+
+    def test_direction_case_insensitive(self):
+        hook = MagicMock()
+        op = self._make_op(["date:ASC", "region:Desc"])
+        op._execute_sort(
+            hook,
+            headers=["date", "region"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=False,
+            end_row=10,
+        )
+        specs = hook.batch_update.call_args[0][1][0]["sortRange"]["sortSpecs"]
+        assert specs[0]["sortOrder"] == "ASCENDING"
+        assert specs[1]["sortOrder"] == "DESCENDING"
+
+    def test_noop_on_empty_range(self):
+        hook = MagicMock()
+        op = self._make_op(["date:desc"])
+        # header-only: skip_header=True, end_row == table_start_row
+        op._execute_sort(
+            hook,
+            headers=["date"],
+            sheet_id=0,
+            table_start_col="A",
+            table_start_row=1,
+            skip_header=True,
+            end_row=1,
+        )
+        hook.batch_update.assert_not_called()
+
+
+# ==================================================================
+# sort_keys — Task 3: integration into _execute_overwrite
+# ==================================================================
+
+
+def _find_sort_range(mock_hook):
+    """Return the sortRange payload from the first batch_update call that has it."""
+    for call_obj in mock_hook.batch_update.call_args_list:
+        for req in call_obj[0][1]:
+            if "sortRange" in req:
+                return req["sortRange"]
+    return None
+
+
+class TestOverwriteSortKeys:
+    def test_overwrite_sort_with_headers(self, mock_hook, context):
+        data = [{"name": f"n{i}", "age": i} for i in range(5)]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            write_headers=True,
+            data=data,
+            sort_keys=["name:asc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # 1 header + 5 data rows, start_row_num=1 → end_row = 0 + 6
+        assert rng["endRowIndex"] == 6
+        # skip header row
+        assert rng["startRowIndex"] == 1
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "ASCENDING"
+
+    def test_overwrite_sort_without_headers(self, mock_hook, context):
+        data = [{"name": f"n{i}", "age": i} for i in range(5)]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            write_headers=False,
+            data=data,
+            sort_keys=["name:asc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # no header row written → end_row = 0 + 5
+        assert rng["endRowIndex"] == 5
+        assert rng["startRowIndex"] == 0
+
+    def test_overwrite_no_sort_keys_no_sort_range(self, mock_hook, context):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"name": "Alice", "age": 30}],
+        )
+        op.execute(context)
+
+        assert _find_sort_range(mock_hook) is None
+
+    def test_overwrite_sort_unknown_column_raises(self, mock_hook, context):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"name": "Alice", "age": 30}],
+            sort_keys=["missing:desc"],
+        )
+        with pytest.raises(ValueError, match="not found in headers"):
+            op.execute(context)
+
+    def test_overwrite_sort_column_mapping(self, mock_hook, context):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"src": "2024-01-01", "val": 1}],
+            column_mapping={"src": "date"},
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        # mapped header order: ["date", "val"] → "date" at index 0
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+
+    def test_overwrite_sort_range_covers_wide_rows(self, mock_hook, context):
+        """list[list] data rows wider than the header row: the sortRange must
+        cover the widest written row, not just len(headers) — otherwise the
+        extra right-hand columns are not reordered and desync from sorted ones."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            # header width 2, data rows width 3
+            data=[
+                ["date", "region"],
+                ["2024-01-02", "a", "extra1"],
+                ["2024-01-01", "b", "extra2"],
+            ],
+            has_headers=True,
+            write_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # widest row is 3 columns → endColumnIndex = 0 + 3, not len(headers)=2
+        assert rng["startColumnIndex"] == 0
+        assert rng["endColumnIndex"] == 3
+        # sort column still resolved via headers
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+
+    def test_overwrite_runtime_clear_mode_range_raises(self, mock_hook, context):
+        """clear_mode is a template field; a value rendered to 'range' at runtime
+        must be re-checked in execute() (the __init__ guard runs before Jinja
+        rendering) and raise before any write happens."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            clear_mode="sheet",  # valid at construction time
+            data=[{"date": "2024-01-01", "region": "a"}],
+            sort_keys=["date:desc"],
+        )
+        # Simulate a templated clear_mode rendering to "range" at runtime.
+        op.clear_mode = "range"
+        with pytest.raises(ValueError, match="clear_mode='range'"):
+            op.execute(context)
+        # guard fired before any mutation
+        mock_hook.clear_values.assert_not_called()
+        mock_hook.update_values.assert_not_called()
+        assert _find_sort_range(mock_hook) is None
+
+    def test_overwrite_runtime_clear_mode_non_sheet_raises(self, mock_hook, context):
+        """_execute_overwrite treats ANY clear_mode != 'sheet' as a partial
+        range clear, so a templated value like 'RANGE' or 'range ' (not the exact
+        literal 'range') must still be caught in execute() before any write."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            clear_mode="sheet",  # valid at construction time
+            data=[{"date": "2024-01-01", "region": "a"}],
+            sort_keys=["date:desc"],
+        )
+        # Simulate a templated clear_mode rendering to a non-"sheet" value that
+        # still triggers a partial range clear.
+        op.clear_mode = "RANGE"
+        with pytest.raises(ValueError, match="clear_mode != 'sheet'"):
+            op.execute(context)
+        # guard fired before any mutation
+        mock_hook.clear_values.assert_not_called()
+        mock_hook.update_values.assert_not_called()
+        assert _find_sort_range(mock_hook) is None
+
+
+# ==================================================================
+# sort_keys — Task 4: integration into _execute_append
+# ==================================================================
+
+
+class TestAppendSortKeys:
+    def test_append_non_empty_sheet_sort(self, mock_hook, context):
+        """Non-empty sheet + has_headers=True → skip_header, end covers all rows."""
+        # full-width read: header + 2 data rows
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-01", "a"],
+            ["2024-01-02", "b"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-03", "region": "c"}],
+            has_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 3 rows + 1 new = 4
+        assert rng["endRowIndex"] == 4
+        # header present → skip it
+        assert rng["startRowIndex"] == 1
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "DESCENDING"
+        # no header re-written on a non-empty sheet
+        mock_hook.update_values.assert_not_called()
+
+    def test_append_sort_width_ignores_wider_existing_rows(self, mock_hook, context):
+        """Width contract (Finding B, Option 2): the sort range spans the table's
+        declared/written width — max(len(headers), widest new row) — and does NOT
+        widen to cover pre-existing on-sheet rows that are wider than the headers.
+        Their right-hand cells are intentionally left unsorted, because an
+        open-width read cannot distinguish same-table ragged cells from foreign
+        adjacent-column data and reordering foreign data would be worse."""
+        # Pre-existing rows on the sheet are 3 columns wide, but headers are 2.
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-01", "a", "foreign1"],
+            ["2024-01-02", "b", "foreign2"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-03", "region": "c"}],
+            has_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # Width stays at the declared table width (2), NOT the wider existing row.
+        assert rng["startColumnIndex"] == 0
+        assert rng["endColumnIndex"] == 2
+
+    def test_append_empty_sheet_write_headers_sort(self, mock_hook, context):
+        """Empty sheet + write_headers=True → header written, skip_header."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            write_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_called_once()
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # 1 header + 1 data row
+        assert rng["endRowIndex"] == 2
+        assert rng["startRowIndex"] == 1
+
+    def test_append_empty_sheet_no_headers_sort(self, mock_hook, context):
+        """Empty sheet + write_headers=False → no header, no skip."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            write_headers=False,
+            has_headers=False,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        mock_hook.update_values.assert_not_called()
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        assert rng["endRowIndex"] == 1
+        assert rng["startRowIndex"] == 0
+
+    def test_append_sort_counts_full_width_not_first_column(self, mock_hook, context):
+        """Existing rows counted across full width, not by the first column."""
+        # First column is empty on every row; second column has data.
+        mock_hook.get_values.return_value = [["", "x"], ["", "y"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-03", "region": "z"}],
+            has_headers=False,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        # existing_row_count = 2 (counted by full width) + 1 new = 3
+        assert sort_range["range"]["endRowIndex"] == 3
+        # full-width read range, not a single cell
+        read_range = mock_hook.get_values.call_args[0][1]
+        assert read_range.endswith("A1:B")
+
+    def test_append_no_sort_keys_no_sort_range(self, mock_hook, context):
+        """sort_keys=None → no sortRange, single-cell emptiness check kept."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            write_headers=True,
+        )
+        op.execute(context)
+
+        assert _find_sort_range(mock_hook) is None
+        # emptiness check uses a single cell, not a full-width range
+        check_range = mock_hook.get_values.call_args[0][1]
+        assert check_range.endswith("A1")
+        assert ":" not in check_range
+
+    def test_append_table_start_c3_column_and_row_offset(self, mock_hook, context):
+        """table_start='C3': the (start_row-1) row offset, full-width read range,
+        and column-offset indices must all be derived from C3, not A1."""
+        # header + 2 data rows at the full width starting from C3
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-01", "a"],
+            ["2024-01-02", "b"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            table_start="C3",
+            data=[{"date": "2024-01-03", "region": "c"}],
+            has_headers=True,
+            sort_keys=["region:asc"],
+        )
+        op.execute(context)
+
+        # full-width read range anchored at C3, spanning C..D
+        read_range = mock_hook.get_values.call_args[0][1]
+        assert read_range.endswith("C3:D")
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # start_row=3, existing 3 rows + 1 new = 4 → end_row = (3-1) + 3 + 1 = 6
+        assert rng["endRowIndex"] == 6
+        # header present + row offset: data_start = (3-1) + 1 = 3
+        assert rng["startRowIndex"] == 3
+        # column offset: table starts at C (index 2)
+        assert rng["startColumnIndex"] == 2
+        assert rng["endColumnIndex"] == 4  # 2 + len(["date","region"])
+        # "region" is header index 1 → absolute dimensionIndex 2 + 1 = 3
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 3
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "ASCENDING"
+
+    def test_append_multi_key_sort_execute(self, mock_hook, context):
+        """execute()-level multi-key sort keeps spec order and directions."""
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-01", "a"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-02", "region": "b"}],
+            has_headers=True,
+            sort_keys=["date:desc", "region:asc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        specs = sort_range["sortSpecs"]
+        assert len(specs) == 2
+        assert specs[0]["dimensionIndex"] == 0  # date
+        assert specs[0]["sortOrder"] == "DESCENDING"
+        assert specs[1]["dimensionIndex"] == 1  # region
+        assert specs[1]["sortOrder"] == "ASCENDING"
+
+    def test_append_write_headers_false_nonempty_skips_header(self, mock_hook, context):
+        """write_headers=False + non-empty sheet + has_headers=True → the existing
+        first row is treated as a header and SKIPPED. has_headers (not
+        write_headers) governs existing-sheet header presence, consistent with
+        build_existing_key_index. startRowIndex == table_start_row - 1 + 1 == 1."""
+        mock_hook.get_values.return_value = [
+            ["date", "region"],
+            ["2024-01-02", "b"],
+        ]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"date": "2024-01-03", "region": "c"}],
+            has_headers=True,
+            write_headers=False,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        # no header row is ever written when write_headers=False
+        mock_hook.update_values.assert_not_called()
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 2 rows + 1 new = 3, header row skipped → sort starts at row 1
+        assert rng["endRowIndex"] == 3
+        assert rng["startRowIndex"] == 1
+
+    def test_append_sort_range_covers_wide_rows(self, mock_hook, context):
+        """list[list] data rows wider than the header row: the sortRange must
+        cover the widest written row, not just len(headers)."""
+        mock_hook.get_values.return_value = []  # empty sheet
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            # header width 2, data row width 3
+            data=[["date", "region"], ["2024-01-02", "a", "extra"]],
+            has_headers=True,
+            write_headers=False,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # widest row is 3 columns → endColumnIndex = 0 + 3, not len(headers)=2
+        assert rng["startColumnIndex"] == 0
+        assert rng["endColumnIndex"] == 3
+        # sort column still resolved via headers
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+
+
+# ==================================================================
+# sort_keys — Task 5: integration into _execute_merge
+# ==================================================================
+
+
+class TestMergeSortKeys:
+    def test_merge_sort_called_last(self, mock_hook, context):
+        """sortRange runs after delete/append and has the correct range."""
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[{"id": "B", "val": "x"}],
+            has_headers=True,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # total_existing 3 - deleted 1 + appended 1 = 3 rows
+        assert rng["endRowIndex"] == 3
+        # header present in the sheet → skip it
+        assert rng["startRowIndex"] == 1
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "DESCENDING"
+
+        # sortRange must be the last batch_update issued
+        last_requests = mock_hook.batch_update.call_args_list[-1][0][1]
+        assert any("sortRange" in r for r in last_requests)
+
+    def test_merge_no_sort_keys_no_sort_range(self, mock_hook, context):
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[{"id": "B", "val": "x"}],
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        assert _find_sort_range(mock_hook) is None
+
+    def test_merge_sort_empty_incoming_still_sorts(self, mock_hook, context):
+        """rows=[] (no append, no delete): sort still runs — total_existing must
+        be computed outside the `if append_rows:` branch (else NameError)."""
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            # header-only list[list] → headers set, rows empty
+            data=[["id", "val"]],
+            has_headers=True,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 0
+        assert result["appended"] == 0
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 3 rows, untouched
+        assert rng["endRowIndex"] == 3
+        assert rng["startRowIndex"] == 1
+
+    def test_merge_sort_skip_header_write_headers_false_nonempty(self, mock_hook, context):
+        """write_headers=False + non-empty sheet + has_headers=True → header SKIPPED.
+
+        has_headers (not write_headers) governs whether the existing first row is
+        a header, matching build_existing_key_index (which skips the existing
+        first row whenever has_headers=True, independent of write_headers). So the
+        existing header row is excluded from the sort → startRowIndex ==
+        table_start_row - 1 + 1 == 1.
+        """
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[{"id": "C", "val": "x"}],
+            has_headers=True,
+            write_headers=False,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 3 rows + 1 appended (new key C) = 4
+        assert rng["endRowIndex"] == 4
+        # has_headers=True → existing first row is a header → skipped
+        assert rng["startRowIndex"] == 1
+
+    def test_merge_sort_skip_header_empty_sheet_no_headers(self, mock_hook, context):
+        """write_headers=False + empty sheet → no header row → do not skip."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[["id", "val"], ["A", "x"]],
+            has_headers=True,
+            write_headers=False,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # nothing existed, 1 appended, no header written
+        assert rng["endRowIndex"] == 1
+        assert rng["startRowIndex"] == 0
+
+    def test_merge_has_headers_false_nonempty_includes_first_row(self, mock_hook, context):
+        """has_headers=False + non-empty sheet: list[dict] input sets headers so
+        sort_keys passes the execute() guard, but the sheet has NO header row.
+        The first data row must be included in the sort range (startRowIndex=0)."""
+        # Two existing DATA rows, no header row (has_headers=False).
+        mock_hook.get_values.return_value = [["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            # list[dict] populates headers regardless of has_headers
+            data=[{"id": "C", "val": "x"}],
+            has_headers=False,
+            write_headers=False,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 2 data rows + 1 appended (new key C) = 3
+        assert rng["endRowIndex"] == 3
+        # no physical header row → first data row IS included in the sort
+        assert rng["startRowIndex"] == 0
+
+    def test_merge_empty_sheet_write_headers_sort(self, mock_hook, context):
+        """Empty sheet + write_headers=True: headers_just_written drives
+        total_existing, end_row and skip_header. Header written, first data row
+        skipped, end_row == 1 header + len(rows)."""
+        mock_hook.get_values.return_value = []  # empty sheet
+        rows_data = [{"id": "A", "val": "x"}, {"id": "B", "val": "y"}]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=rows_data,
+            has_headers=True,
+            write_headers=True,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        op.execute(context)
+
+        # header row was physically written to the empty sheet
+        mock_hook.update_values.assert_called_once()
+        written = mock_hook.update_values.call_args[0][2]
+        assert written == [["id", "val"]]
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # start_row=1 (table_start A1) → data_start = (1-1) + 1(skip header) = 1
+        assert rng["startRowIndex"] == 1  # == table_start_row
+        assert rng["endRowIndex"] == 1 + len(rows_data)
+
+
+# ==================================================================
+# sort_keys — Task 6: edge cases and finalization
+# ==================================================================
+
+
+class TestSortKeysEdgeCases:
+    def test_overwrite_empty_after_partition_sort_noop(self, mock_hook, context):
+        """partition filters out all rows → header-only table → sort is a no-op
+        (data_start >= end_row) and must not raise."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            partition_by="region",
+            partition_value="zzz",  # matches nothing
+            write_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        # header-only range: startRowIndex(1) >= endRowIndex(1) → no sortRange
+        assert _find_sort_range(mock_hook) is None
+
+    def test_overwrite_empty_rows_write_headers_sort_noop(self, mock_hook, context):
+        """overwrite with rows=[] (header-only list[list]) + write_headers=True →
+        header-only range → sort no-op, no crash."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[["date", "region"]],  # header only → rows empty
+            has_headers=True,
+            write_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        assert _find_sort_range(mock_hook) is None
+
+    def test_overwrite_empty_rows_no_headers_sort_noop(self, mock_hook, context):
+        """overwrite with rows=[] + write_headers=False → fully empty range →
+        sort no-op, no crash."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[["date", "region"]],  # header only → rows empty
+            has_headers=True,
+            write_headers=False,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        assert _find_sort_range(mock_hook) is None
+
+    def test_merge_no_append_no_delete_sorts_existing(self, mock_hook, context):
+        """merge with no append and no delete still issues a sortRange over the
+        existing rows only."""
+        # 3 existing rows; incoming key "C" is absent → no delete, but appends.
+        # To have neither delete nor append, send header-only data (rows empty).
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"], ["C"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[["id", "val"]],  # header only → rows empty
+            has_headers=True,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 0
+        assert result["appended"] == 0
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # 4 existing rows (1 header + 3 data), untouched
+        assert rng["endRowIndex"] == 4
+        assert rng["startRowIndex"] == 1
+
+    def test_sort_keys_has_headers_false_raises_in_execute(self, mock_hook, context):
+        """has_headers=False → no named headers → ValueError before sorting."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[["2024-01-01", "a"]],
+            has_headers=False,
+            sort_keys=["date:desc"],
+        )
+        with pytest.raises(ValueError, match="requires named headers"):
+            op.execute(context)
+        # execution stopped before any sortRange was issued
+        assert _find_sort_range(mock_hook) is None
+
+    def test_sort_keys_create_sheet_missing_empty_after_partition_noop(
+        self, mock_hook, context
+    ):
+        """create_sheet_if_missing on a brand-new empty sheet + rows=[] after
+        partition → sort no-op, no crash."""
+        mock_hook.get_values.return_value = []  # freshly created sheet is empty
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="New",  # not in default metadata → gets created
+            create_sheet_if_missing=True,
+            write_mode="append",
+            data=[{"date": "2024-01-01", "region": "a"}],
+            partition_by="region",
+            partition_value="zzz",  # matches nothing → rows empty
+            write_headers=True,
+            sort_keys=["date:desc"],
+        )
+        op.execute(context)
+
+        mock_hook.create_sheet.assert_called_once()
+        # header written (empty sheet), no data → header-only range → sort no-op
+        assert _find_sort_range(mock_hook) is None
