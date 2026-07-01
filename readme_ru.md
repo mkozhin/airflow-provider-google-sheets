@@ -304,6 +304,16 @@ merge_offset = GoogleSheetsWriteOperator(
     table_start="C3",   # заголовок таблицы находится в ячейке C3
     data=[{"date": "2024-01-01", "revenue": 110}],
 )
+
+# Сортировка таблицы после записи (новые даты сверху)
+sorted_merge = GoogleSheetsWriteOperator(
+    task_id="sorted_merge",
+    spreadsheet_id="your-spreadsheet-id",
+    write_mode="merge",
+    merge_key="date",
+    data=[{"date": "2024-01-03", "value": 200}],
+    sort_keys=["date:desc"],   # серверный sortRange после записи
+)
 ```
 
 **Параметры:**
@@ -330,6 +340,7 @@ merge_offset = GoogleSheetsWriteOperator(
 | `partition_by` | str | `None` | Имя колонки для фильтрации данных перед записью. Записываются только строки, где значение колонки совпадает с `partition_value` |
 | `partition_value` | str | `None` | Значение для сопоставления с колонкой `partition_by`. Обязателен если задан `partition_by` |
 | `column_mapping` | dict | `None` | Переименование заголовков перед записью: `{"исходная_колонка": "Заголовок в таблице"}`. Применяется после всей фильтрации — `merge_key`, `partition_by` и `schema` всегда используют **оригинальные** имена колонок из входных данных |
+| `sort_keys` | list[str] | `None` | Сортировка таблицы на стороне сервера после записи (в любом режиме). Элементы — `"колонка:asc"` / `"колонка:desc"` (регистр направления не важен), например `["date:desc", "region:asc"]`. Имена колонок — **после** `column_mapping`. Требуются именованные заголовки; сортируются только колонки самой таблицы. Формат проверяется на этапе загрузки DAG. Несовместимо с `overwrite` + `clear_mode="range"` и с `append` + `cell_range` |
 | `normalize_merge_key_format` | bool | `True` | При `True` нормализация ключа merge пробует расширенные fallback-стратегии: `input_format`, затем Google Sheets serial date number (только для колонок `date`/`datetime`). Также включает schema-free инференс даты для `merge_key` (см. ниже). Установите `False` чтобы вернуть поведение до v0.10.0 |
 
 **Форматы входных данных:**

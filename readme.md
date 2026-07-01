@@ -302,6 +302,16 @@ merge_offset = GoogleSheetsWriteOperator(
     table_start="C3",   # table header lives at C3
     data=[{"date": "2024-01-01", "revenue": 110}],
 )
+
+# Sort the table after writing (newest dates on top)
+sorted_merge = GoogleSheetsWriteOperator(
+    task_id="sorted_merge",
+    spreadsheet_id="your-spreadsheet-id",
+    write_mode="merge",
+    merge_key="date",
+    data=[{"date": "2024-01-03", "value": 200}],
+    sort_keys=["date:desc"],   # server-side sortRange after the write
+)
 ```
 
 **Parameters:**
@@ -329,6 +339,7 @@ merge_offset = GoogleSheetsWriteOperator(
 | `partition_by` | str | `None` | Column name to filter data by before writing. Only rows where the column value matches `partition_value` are written |
 | `partition_value` | str | `None` | Value to match against `partition_by` column. Required when `partition_by` is set |
 | `column_mapping` | dict | `None` | Rename headers before writing: `{"source_col": "Sheet Header"}`. Applied after all filtering — `merge_key`, `partition_by`, and `schema` always reference the **original** column names from the input data |
+| `sort_keys` | list[str] | `None` | Sort the table server-side after writing (any write mode). Items are `"column:asc"` / `"column:desc"` (direction case-insensitive), e.g. `["date:desc", "region:asc"]`. Column names refer to headers **after** `column_mapping`. Requires named headers; only the table's own columns are sorted. Format validated at DAG-load time. Not compatible with `overwrite` + `clear_mode="range"` or `append` + `cell_range` |
 
 **Data input formats:**
 - `list[dict]` — headers auto-detected from keys
