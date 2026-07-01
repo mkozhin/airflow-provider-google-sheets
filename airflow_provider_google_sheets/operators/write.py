@@ -434,6 +434,21 @@ class GoogleSheetsWriteOperator(BaseOperator):
             keep_rows = start_row_num + len(all_rows) - 1
             hook.trim_sheet(self.spreadsheet_id, self.sheet_name, keep_rows)
 
+        # Server-side sort (clear_mode="range" is already blocked in __init__).
+        if self.sort_keys:
+            skip_header = bool(self.write_headers and headers)
+            # all_rows already includes the header row when write_headers=True.
+            end_row = (start_row_num - 1) + len(all_rows)
+            self._execute_sort(
+                hook,
+                headers,
+                self._get_sheet_id(hook),
+                start_col,
+                start_row_num,
+                skip_header,
+                end_row,
+            )
+
         logger.info("Overwrite complete: %d rows written", total_written)
         return {"mode": "overwrite", "rows_written": total_written}
 
