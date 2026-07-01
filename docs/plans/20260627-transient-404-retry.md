@@ -167,15 +167,15 @@ fail-fast (append вне scope).
 
 **Files:** Modify `tests/test_operators/test_write.py`
 
-- [ ] завести **stateful in-memory fake sheet/hook** (хранит строки листа; `deleteDimension`/`append_values`/`update_values`/`clear`/`sortRange`/metadata меняют состояние) — иначе идемпотентность недоказуема на `MagicMock` (проверять ФИНАЛЬНЫЕ строки после retry, не call-count)
-- [ ] merge: 404 на `deleteDimension` (deletes применились) → re-run всей merge → финальные строки без дублей/потери
-- [ ] merge: 404 на `append_values` mid-loop → re-run → финальные строки корректны
-- [ ] merge: round-trip — частично дописанные строки с входящим ключом на re-run находятся и удаляются (date-ключ через SERIAL_NUMBER)
-- [ ] merge + `sort_keys`: 404 на sort-хвосте → re-run → отсортировано без дублей
-- [ ] overwrite: 404 в середине → re-run → финальные строки без дублей
-- [ ] overwrite + `sort_keys`: 404 на sort-хвосте → re-run → корректно
-- [ ] `_ensure_sheet_exists`: 404 на `create_sheet`/metadata → повтор через wrapper, не падает
-- [ ] прогнать тесты — должны пройти
+- [x] завести **stateful in-memory fake sheet/hook** (хранит строки листа; `deleteDimension`/`append_values`/`update_values`/`clear`/`sortRange`/metadata меняют состояние) — иначе идемпотентность недоказуема на `MagicMock` (проверять ФИНАЛЬНЫЕ строки после retry, не call-count)
+- [x] merge: 404 на `deleteDimension` (deletes применились) → re-run всей merge → финальные строки без дублей/потери
+- [x] merge: 404 на `append_values` mid-loop → re-run → финальные строки корректны
+- [x] merge: round-trip — частично дописанные строки с входящим ключом на re-run находятся и удаляются (date-ключ через SERIAL_NUMBER)
+- [x] merge + `sort_keys`: 404 на sort-хвосте → re-run → отсортировано без дублей
+- [x] overwrite: 404 в середине → re-run → финальные строки без дублей
+- [x] overwrite + `sort_keys`: 404 на sort-хвосте → re-run → корректно
+- [x] `_ensure_sheet_exists`: 404 на `create_sheet`/metadata → повтор через wrapper, не падает
+- [x] прогнать тесты — должны пройти
 
 ### Task 3: fail-fast тесты (не-404, append, hook-level)
 

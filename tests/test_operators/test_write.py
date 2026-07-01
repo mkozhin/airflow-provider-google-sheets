@@ -3462,3 +3462,527 @@ class TestSortKeysEdgeCases:
         mock_hook.create_sheet.assert_called_once()
         # header written (empty sheet), no data → header-only range → sort no-op
         assert _find_sort_range(mock_hook) is None
+
+
+# ==================================================================
+# Task 2 — Stateful in-memory fake sheet + transient-404 idempotency
+# ==================================================================
+#
+# These tests prove idempotency by asserting the FINAL sheet rows after a
+# re-run triggered by a transient 404 — NOT by call-count. The fake below
+# actually mutates an in-memory grid on deleteDimension / append_values /
+# update_values / clear / sortRange, and models the SERIAL_NUMBER date
+# round-trip that merge idempotency depends on.
+
+import re as _re
+from collections import defaultdict as _defaultdict
+from datetime import date as _date
+
+from googleapiclient.errors import HttpError as _HttpError
+from httplib2 import Response as _Response
+
+_SHEETS_EPOCH = _date(1899, 12, 30)
+_ISO_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _to_serial(value):
+    """Model Sheets' SERIAL_NUMBER render option for ISO-date cells."""
+    if isinstance(value, str) and _ISO_RE.match(value):
+        try:
+            return (_date.fromisoformat(value) - _SHEETS_EPOCH).days
+        except ValueError:
+            return value
+    return value
+
+
+def _parse_cell(token):
+    """'A1' -> (0, 1); 'B' -> (1, None)."""
+    letters = "".join(c for c in token if c.isalpha())
+    digits = "".join(c for c in token if c.isdigit())
+    col = 0
+    for ch in letters.upper():
+        col = col * 26 + (ord(ch) - ord("A") + 1)
+    col -= 1
+    row = int(digits) if digits else None
+    return col, row
+
+
+def _parse_range(rng):
+    """Parse an A1 range (optionally 'Title!...') into col/row bounds."""
+    if "!" in rng:
+        rng = rng.split("!", 1)[1]
+    if ":" in rng:
+        left, right = rng.split(":", 1)
+        sc, sr = _parse_cell(left)
+        ec, er = _parse_cell(right)
+    else:
+        sc, sr = _parse_cell(rng)
+        ec, er = sc, sr
+    return sc, sr, ec, er
+
+
+class FakeSheet:
+    """Mutable in-memory grid modelling a single sheet tab.
+
+    Rows are ``list[list]``; column A is index 0. Trailing empties are trimmed
+    on read, mirroring the real ``values.get`` behaviour.
+    """
+
+    def __init__(self, grid=None, titles=None):
+        # deep-ish copy so callers can keep their literal
+        self.grid = [list(r) for r in (grid or [])]
+        self.titles = list(titles or ["Sheet1"])
+
+    # -- internal helpers -------------------------------------------------
+    def _set(self, row_1based, col_0based, value):
+        while len(self.grid) < row_1based:
+            self.grid.append([])
+        row = self.grid[row_1based - 1]
+        while len(row) <= col_0based:
+            row.append("")
+        row[col_0based] = value
+
+    def _last_occupied_row(self):
+        last = 0
+        for i, row in enumerate(self.grid, start=1):
+            if any(str(c).strip() != "" for c in row):
+                last = i
+        return last
+
+    # -- mutating / reading operations -----------------------------------
+    def get_values(self, rng, date_time_render_option="FORMATTED_STRING"):
+        sc, sr, ec, er = _parse_range(rng)
+        sr = sr or 1
+        end_row = er if er is not None else self._last_occupied_row()
+        end_col = ec if ec is not None else sc
+        out = []
+        for r in range(sr, end_row + 1):
+            row = self.grid[r - 1] if r - 1 < len(self.grid) else []
+            cells = []
+            for c in range(sc, end_col + 1):
+                v = row[c] if c < len(row) else ""
+                if date_time_render_option == "SERIAL_NUMBER":
+                    v = _to_serial(v)
+                cells.append(v)
+            # trim trailing empty cells within the row (-> [] for empty rows)
+            while cells and (cells[-1] == "" or cells[-1] is None):
+                cells.pop()
+            out.append(cells)
+        # trim trailing empty rows
+        while out and not out[-1]:
+            out.pop()
+        return out
+
+    def update_values(self, rng, values):
+        sc, sr, _ec, _er = _parse_range(rng)
+        sr = sr or 1
+        for i, row in enumerate(values):
+            for j, v in enumerate(row):
+                self._set(sr + i, sc + j, v)
+
+    def append_values(self, rng, values):
+        sc, _sr, _ec, _er = _parse_range(rng)
+        base = self._last_occupied_row()
+        for i, row in enumerate(values):
+            for j, v in enumerate(row):
+                self._set(base + 1 + i, sc + j, v)
+
+    def clear_values(self, rng):
+        if ":" not in rng:
+            # bare title -> whole-sheet clear
+            self.grid = []
+            return
+        sc, sr, ec, er = _parse_range(rng)
+        sr = sr or 1
+        end_row = er if er is not None else len(self.grid)
+        end_col = ec if ec is not None else sc
+        for r in range(sr, end_row + 1):
+            if r - 1 < len(self.grid):
+                row = self.grid[r - 1]
+                for c in range(sc, end_col + 1):
+                    if c < len(row):
+                        row[c] = ""
+
+    def ensure_rows(self, required):
+        while len(self.grid) < required:
+            self.grid.append([])
+
+    def trim_sheet(self, keep_rows):
+        self.grid = self.grid[:keep_rows]
+
+    def delete_dimension(self, start_index, end_index):
+        # 0-based [start, end) row deletion, shifts subsequent rows up
+        del self.grid[start_index:end_index]
+
+    def sort_range(self, start_row, end_row, sort_specs):
+        block = self.grid[start_row:end_row]
+        for spec in reversed(sort_specs):
+            dim = spec["dimensionIndex"]
+            reverse = spec["sortOrder"] == "DESCENDING"
+            block.sort(
+                key=lambda r, d=dim: (r[d] if d < len(r) else ""),
+                reverse=reverse,
+            )
+        self.grid[start_row:end_row] = block
+
+    def data_rows(self, skip_header=True):
+        """Return grid rows (optionally skipping the header) for assertions."""
+        rows = self.grid[1:] if skip_header else self.grid
+        return [list(r) for r in rows]
+
+
+class FakeSheetsHook:
+    """Stateful fake hook wrapping a :class:`FakeSheet`.
+
+    Supports one-shot fault injection via :meth:`fail_once` so a transient
+    404 can be raised at a chosen operation/occurrence (``before`` or
+    ``after`` the state mutation is applied).
+    """
+
+    def __init__(self, sheet):
+        self.sheet = sheet
+        self._counts = _defaultdict(int)
+        self._faults = _defaultdict(list)
+
+    # -- fault injection --------------------------------------------------
+    def fail_once(self, op, status=404, when="after", occurrence=1):
+        self._faults[op].append(
+            {"occurrence": occurrence, "status": status, "when": when, "fired": False}
+        )
+
+    def _enter(self, op):
+        self._counts[op] += 1
+        return self._counts[op]
+
+    def _maybe_fail(self, op, count, phase):
+        for f in self._faults[op]:
+            if not f["fired"] and f["occurrence"] == count and f["when"] == phase:
+                f["fired"] = True
+                raise _HttpError(_Response({"status": f["status"]}), b"boom")
+
+    # -- metadata ---------------------------------------------------------
+    def get_spreadsheet_metadata(self, spreadsheet_id):
+        n = self._enter("get_spreadsheet_metadata")
+        self._maybe_fail("get_spreadsheet_metadata", n, "before")
+        result = {
+            "sheets": [
+                {"properties": {"sheetId": i, "title": t}}
+                for i, t in enumerate(self.sheet.titles)
+            ]
+        }
+        self._maybe_fail("get_spreadsheet_metadata", n, "after")
+        return result
+
+    def get_sheet_id(self, spreadsheet_id, sheet_name):
+        return (
+            self.sheet.titles.index(sheet_name)
+            if sheet_name in self.sheet.titles
+            else 0
+        )
+
+    def create_sheet(self, spreadsheet_id, sheet_name):
+        n = self._enter("create_sheet")
+        self._maybe_fail("create_sheet", n, "before")
+        if sheet_name not in self.sheet.titles:
+            self.sheet.titles.append(sheet_name)
+        self._maybe_fail("create_sheet", n, "after")
+
+    # -- values -----------------------------------------------------------
+    def get_values(self, spreadsheet_id, rng, date_time_render_option="FORMATTED_STRING"):
+        n = self._enter("get_values")
+        self._maybe_fail("get_values", n, "before")
+        result = self.sheet.get_values(rng, date_time_render_option)
+        self._maybe_fail("get_values", n, "after")
+        return result
+
+    def update_values(self, spreadsheet_id, rng, values):
+        n = self._enter("update_values")
+        self._maybe_fail("update_values", n, "before")
+        self.sheet.update_values(rng, values)
+        self._maybe_fail("update_values", n, "after")
+
+    def append_values(self, spreadsheet_id, rng, values):
+        n = self._enter("append_values")
+        self._maybe_fail("append_values", n, "before")
+        self.sheet.append_values(rng, values)
+        self._maybe_fail("append_values", n, "after")
+
+    def clear_values(self, spreadsheet_id, rng):
+        n = self._enter("clear_values")
+        self._maybe_fail("clear_values", n, "before")
+        self.sheet.clear_values(rng)
+        self._maybe_fail("clear_values", n, "after")
+
+    def ensure_rows(self, spreadsheet_id, sheet_name, required):
+        self.sheet.ensure_rows(required)
+
+    def trim_sheet(self, spreadsheet_id, sheet_name, keep_rows):
+        self.sheet.trim_sheet(keep_rows)
+
+    # -- batch update (deleteDimension / repeatCell / sortRange) ----------
+    def batch_update(self, spreadsheet_id, requests):
+        op = next(iter(requests[0].keys()))
+        n = self._enter(op)
+        self._maybe_fail(op, n, "before")
+        for req in requests:
+            self._apply_request(req)
+        self._maybe_fail(op, n, "after")
+
+    def _apply_request(self, req):
+        if "deleteDimension" in req:
+            rng = req["deleteDimension"]["range"]
+            self.sheet.delete_dimension(rng["startIndex"], rng["endIndex"])
+        elif "sortRange" in req:
+            sr = req["sortRange"]
+            rng = sr["range"]
+            self.sheet.sort_range(
+                rng["startRowIndex"], rng["endRowIndex"], sr["sortSpecs"]
+            )
+        # repeatCell: formatting only -> no-op on the value grid
+
+
+def _run_with_fake(fake_hook, op, context):
+    """Execute *op* with the fake hook patched in and sleep disabled."""
+    with patch(
+        "airflow_provider_google_sheets.operators.write.GoogleSheetsHook",
+        return_value=fake_hook,
+    ), patch("airflow_provider_google_sheets.operators.write.time.sleep"):
+        return op.execute(context)
+
+
+class TestTransient404IdempotencyMerge:
+    def test_404_on_delete_dimension_reruns_no_dupes(self, context):
+        """404 right after deleteDimension (deletes applied, appends not) →
+        full merge re-run yields the correct final rows without dupes/loss."""
+        sheet = FakeSheet(
+            grid=[
+                ["date", "value"],
+                ["2026-01-14", "old-A"],
+                ["2026-01-15", "old-B"],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("deleteDimension", status=404, when="after", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[{"date": "2026-01-15", "value": "new-B"}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert sheet.data_rows() == [
+            ["2026-01-14", "old-A"],
+            ["2026-01-15", "new-B"],
+        ]
+
+    def test_404_on_append_mid_loop_reruns_correct(self, context):
+        """404 mid append loop (first batch applied) → re-run → correct rows."""
+        sheet = FakeSheet(
+            grid=[
+                ["date", "value"],
+                ["2026-01-14", "old-A"],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        # batch_size=1 -> two append calls; fail before the 2nd (first applied)
+        hook.fail_once("append_values", status=404, when="before", occurrence=2)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[
+                {"date": "2026-01-16", "value": "C"},
+                {"date": "2026-01-17", "value": "D"},
+            ],
+            batch_size=1,
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert sorted(sheet.data_rows()) == [
+            ["2026-01-14", "old-A"],
+            ["2026-01-16", "C"],
+            ["2026-01-17", "D"],
+        ]
+
+    def test_round_trip_partial_append_found_and_deleted_on_rerun(self, context):
+        """The load-bearing merge assumption: a row appended in run 1 (its date
+        key stored) is read back via SERIAL_NUMBER, normalised to the same key,
+        found and deleted on the re-run → no duplicate."""
+        sheet = FakeSheet(
+            grid=[
+                ["date", "value"],
+                ["2026-01-14", "old-A"],
+                ["2026-01-15", "old-B"],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        # deletes + append applied, then 404 on repeatCell (post-append)
+        hook.fail_once("repeatCell", status=404, when="after", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[{"date": "2026-01-15", "value": "new-B"}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        # Exactly one 2026-01-15 row, carrying the new value (no duplicate).
+        assert sheet.data_rows() == [
+            ["2026-01-14", "old-A"],
+            ["2026-01-15", "new-B"],
+        ]
+
+    def test_merge_sort_tail_404_reruns_sorted_no_dupes(self, context):
+        """404 on the sort tail → re-run → sorted, no dupes."""
+        sheet = FakeSheet(
+            grid=[
+                ["date", "value"],
+                ["2026-01-14", "old-A"],
+                ["2026-01-15", "old-B"],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("sortRange", status=404, when="before", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[{"date": "2026-01-16", "value": "C"}],
+            sort_keys=["date:desc"],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert sheet.data_rows() == [
+            ["2026-01-16", "C"],
+            ["2026-01-15", "old-B"],
+            ["2026-01-14", "old-A"],
+        ]
+
+
+class TestTransient404IdempotencyOverwrite:
+    def test_overwrite_404_mid_write_reruns_no_dupes(self, context):
+        """404 mid write (partial batch written) → re-clear + rewrite on re-run
+        → exactly the new rows, no dupes or stale rows."""
+        sheet = FakeSheet(
+            grid=[
+                ["name", "n"],
+                ["stale-1", 91],
+                ["stale-2", 92],
+                ["stale-3", 93],
+                ["stale-4", 94],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        # header + 3 rows @ batch_size=1 -> 4 update_values calls; fail after #3
+        hook.fail_once("update_values", status=404, when="after", occurrence=3)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[
+                {"name": "Al", "n": 1},
+                {"name": "Bo", "n": 2},
+                {"name": "Cy", "n": 3},
+            ],
+            batch_size=1,
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert sheet.grid == [
+            ["name", "n"],
+            ["Al", 1],
+            ["Bo", 2],
+            ["Cy", 3],
+        ]
+
+    def test_overwrite_sort_tail_404_reruns_sorted(self, context):
+        """404 on the sort tail → full overwrite re-run → sorted correctly."""
+        sheet = FakeSheet(grid=[["old"], ["x"]])
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("sortRange", status=404, when="before", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[
+                {"date": "2026-01-14", "v": "a"},
+                {"date": "2026-01-16", "v": "c"},
+                {"date": "2026-01-15", "v": "b"},
+            ],
+            sort_keys=["date:desc"],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert sheet.grid == [
+            ["date", "v"],
+            ["2026-01-16", "c"],
+            ["2026-01-15", "b"],
+            ["2026-01-14", "a"],
+        ]
+
+
+class TestTransient404EnsureSheet:
+    def test_ensure_sheet_404_on_create_reruns_and_creates(self, context):
+        """404 on create_sheet → wrapper re-runs the ensure step → sheet is
+        created on the retry and the write proceeds without raising."""
+        sheet = FakeSheet(grid=[], titles=["Jan"])
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("create_sheet", status=404, when="before", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Feb",
+            create_sheet_if_missing=True,
+            write_mode="overwrite",
+            data=[{"col": 1}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert "Feb" in sheet.titles
+        assert hook._counts["create_sheet"] == 2  # first 404, second succeeds
+
+    def test_ensure_sheet_404_on_metadata_reruns(self, context):
+        """404 on the metadata read inside ensure → wrapper re-runs → succeeds."""
+        sheet = FakeSheet(grid=[], titles=["Jan"])
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("get_spreadsheet_metadata", status=404, when="before", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            sheet_name="Feb",
+            create_sheet_if_missing=True,
+            write_mode="overwrite",
+            data=[{"col": 1}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert "Feb" in sheet.titles
