@@ -661,9 +661,13 @@ class GoogleSheetsWriteOperator(BaseOperator):
             total_deleted = sum(op["end_index"] - op["start_index"] for op in delete_ops)
             stats["deleted"] = total_deleted
 
+        # total_existing is needed for both the append branch (insert position)
+        # and the sort branch (end_row), which runs even when append_rows is
+        # empty — so it lives above the `if append_rows:` guard.
+        total_existing = len(existing_keys_raw) + (1 if headers_just_written else 0)
+
         # Step 6 — Append incoming rows with clean (default) formatting
         if append_rows:
-            total_existing = len(existing_keys_raw) + (1 if headers_just_written else 0)
             rows_after_deletion = total_existing - total_deleted
             # 0-based absolute row position where new rows will land (for repeatCell)
             insert_start = (table_start_row - 1) + rows_after_deletion
@@ -710,6 +714,23 @@ class GoogleSheetsWriteOperator(BaseOperator):
                     }
                 }
             ])
+
+        # Server-side sort after all mutations (deletes + appends).
+        if self.sort_keys:
+            rows_after_merge = total_existing - total_deleted + len(append_rows)
+            end_row = (table_start_row - 1) + rows_after_merge
+            # Header is present in the sheet if it was already there
+            # (existing_keys_raw non-empty) or was just written this run.
+            skip_header = bool(existing_keys_raw) or headers_just_written
+            self._execute_sort(
+                hook,
+                headers,
+                sheet_id,
+                table_start_col,
+                table_start_row,
+                skip_header,
+                end_row,
+            )
 
         logger.info("Merge complete: %s", stats)
         return {"mode": "merge", **stats}

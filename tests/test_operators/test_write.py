@@ -2817,3 +2817,129 @@ class TestAppendSortKeys:
         check_range = mock_hook.get_values.call_args[0][1]
         assert check_range.endswith("A1")
         assert ":" not in check_range
+
+
+# ==================================================================
+# sort_keys — Task 5: integration into _execute_merge
+# ==================================================================
+
+
+class TestMergeSortKeys:
+    def test_merge_sort_called_last(self, mock_hook, context):
+        """sortRange runs after delete/append and has the correct range."""
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[{"id": "B", "val": "x"}],
+            has_headers=True,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 1
+        assert result["appended"] == 1
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # total_existing 3 - deleted 1 + appended 1 = 3 rows
+        assert rng["endRowIndex"] == 3
+        # header present in the sheet → skip it
+        assert rng["startRowIndex"] == 1
+        assert sort_range["sortSpecs"][0]["dimensionIndex"] == 0
+        assert sort_range["sortSpecs"][0]["sortOrder"] == "DESCENDING"
+
+        # sortRange must be the last batch_update issued
+        last_requests = mock_hook.batch_update.call_args_list[-1][0][1]
+        assert any("sortRange" in r for r in last_requests)
+
+    def test_merge_no_sort_keys_no_sort_range(self, mock_hook, context):
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[{"id": "B", "val": "x"}],
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        assert _find_sort_range(mock_hook) is None
+
+    def test_merge_sort_empty_incoming_still_sorts(self, mock_hook, context):
+        """rows=[] (no append, no delete): sort still runs — total_existing must
+        be computed outside the `if append_rows:` branch (else NameError)."""
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            # header-only list[list] → headers set, rows empty
+            data=[["id", "val"]],
+            has_headers=True,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        result = op.execute(context)
+
+        assert result["deleted"] == 0
+        assert result["appended"] == 0
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 3 rows, untouched
+        assert rng["endRowIndex"] == 3
+        assert rng["startRowIndex"] == 1
+
+    def test_merge_sort_skip_header_write_headers_false_nonempty(self, mock_hook, context):
+        """write_headers=False + non-empty sheet → header already present → skip."""
+        mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[{"id": "C", "val": "x"}],
+            has_headers=True,
+            write_headers=False,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # existing 3 rows + 1 appended (new key C) = 4
+        assert rng["endRowIndex"] == 4
+        assert rng["startRowIndex"] == 1
+
+    def test_merge_sort_skip_header_empty_sheet_no_headers(self, mock_hook, context):
+        """write_headers=False + empty sheet → no header row → do not skip."""
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="id",
+            data=[["id", "val"], ["A", "x"]],
+            has_headers=True,
+            write_headers=False,
+            pause_between_batches=0,
+            sort_keys=["id:desc"],
+        )
+        op.execute(context)
+
+        sort_range = _find_sort_range(mock_hook)
+        assert sort_range is not None
+        rng = sort_range["range"]
+        # nothing existed, 1 appended, no header written
+        assert rng["endRowIndex"] == 1
+        assert rng["startRowIndex"] == 0
