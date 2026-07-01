@@ -91,6 +91,18 @@ class GoogleSheetsWriteOperator(BaseOperator):
             inference too (key read falls back to the legacy
             ``FORMATTED_STRING`` behaviour). Boolean flags are not
             template-rendered.
+        sort_keys: Optional list of sort specifications applied server-side
+            (via a single ``sortRange`` ``batchUpdate``) after the write
+            completes, in any write mode.  Each item has the form
+            ``"column:asc"`` or ``"column:desc"`` (direction is
+            case-insensitive), e.g. ``["date:desc", "region:asc"]``.  Column
+            names refer to the headers **after** ``column_mapping`` is applied.
+            Requires named headers (``has_headers=True`` or ``list[dict]``
+            input) and only sorts the table's own columns.  Not compatible with
+            ``overwrite`` + ``clear_mode="range"`` or with ``append`` +
+            ``cell_range`` (write target and sort range must share the same
+            ``table_start``).  Format is validated at DAG-load time; it is not a
+            template field.
     """
 
     template_fields: Sequence[str] = (
@@ -131,6 +143,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         column_mapping: dict[str, str] | None = None,
         request_timeout: int | None = 300,
         normalize_merge_key_format: bool = True,
+        sort_keys: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -161,6 +174,53 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.column_mapping = column_mapping
         self.request_timeout = request_timeout
         self.normalize_merge_key_format = normalize_merge_key_format
+        self.sort_keys = sort_keys
+
+        # Full format validation happens here (in __init__) so that mistakes
+        # surface at DAG-load time. sort_keys is intentionally NOT a template
+        # field; if templating is ever needed, move this validation to execute().
+        if sort_keys is not None:
+            if not isinstance(sort_keys, list):
+                raise TypeError(
+                    f"sort_keys must be a list, got {type(sort_keys).__name__}"
+                )
+            if not sort_keys:
+                raise ValueError("sort_keys must be a non-empty list or None")
+            if write_mode == "overwrite" and clear_mode == "range":
+                raise ValueError(
+                    "sort_keys is not compatible with overwrite + clear_mode='range': "
+                    "sorting across partial column ranges desyncs neighbouring columns"
+                )
+            if self.cell_range and write_mode == "append":
+                raise ValueError(
+                    "sort_keys is not compatible with append + cell_range: "
+                    "write target and sort range must share the same table_start"
+                )
+            seen_cols: set[str] = set()
+            for spec in sort_keys:
+                if not isinstance(spec, str):
+                    raise TypeError(
+                        f"sort_keys item must be a string, "
+                        f"got {type(spec).__name__}: {spec!r}"
+                    )
+                if ":" not in spec:
+                    raise ValueError(
+                        f"sort_keys item '{spec}' must be 'column:asc' or 'column:desc'"
+                    )
+                col, direction = spec.split(":", 1)
+                col = col.strip()
+                if not col:
+                    raise ValueError(f"sort_keys item '{spec}': column name is empty")
+                if direction.strip().lower() not in ("asc", "desc"):
+                    raise ValueError(
+                        f"sort_keys item '{spec}': direction must be 'asc' or 'desc', "
+                        f"got '{direction.strip()}'"
+                    )
+                if col in seen_cols:
+                    raise ValueError(
+                        f"sort_keys column '{col}' is specified more than once"
+                    )
+                seen_cols.add(col)
 
     # ------------------------------------------------------------------
     # helpers
@@ -267,6 +327,21 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # all reference the original column names from the input data.
         original_headers = headers
         headers = self._apply_column_mapping(headers)
+
+        # Runtime-only sort_keys checks (format was validated in __init__).
+        # Must run after column_mapping so sort_keys reference post-mapping names.
+        if self.sort_keys:
+            if not headers:
+                raise ValueError(
+                    "sort_keys requires named headers (has_headers=True or "
+                    "list[dict] input)"
+                )
+            for spec in self.sort_keys:
+                col = spec.split(":", 1)[0].strip()
+                if col not in headers:
+                    raise ValueError(
+                        f"sort_keys column '{col}' not found in headers: {headers}"
+                    )
 
         if self.write_mode == "overwrite":
             return self._execute_overwrite(hook, headers, rows)

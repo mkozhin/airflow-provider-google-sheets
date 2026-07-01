@@ -2295,3 +2295,160 @@ class TestRequestTimeout:
             )
             op.execute(context)
             hook_cls.assert_called_once_with(gcp_conn_id="google_cloud_default", request_timeout=None)
+
+
+# ==================================================================
+# sort_keys — Task 1: validation in __init__ and execute
+# ==================================================================
+
+
+class TestSortKeysValidation:
+    def test_valid_sort_keys_init(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            sort_keys=["date:desc"],
+        )
+        assert op.sort_keys == ["date:desc"]
+
+    def test_sort_keys_default_none(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+        )
+        assert op.sort_keys is None
+
+    def test_sort_keys_not_list_raises_typeerror(self):
+        with pytest.raises(TypeError, match="sort_keys must be a list"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys="date:desc",
+            )
+
+    def test_sort_keys_non_string_item_raises_typeerror(self):
+        with pytest.raises(TypeError, match="sort_keys item must be a string"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=[123],
+            )
+
+    def test_sort_keys_empty_list_raises_valueerror(self):
+        with pytest.raises(ValueError, match="non-empty list or None"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=[],
+            )
+
+    def test_sort_keys_duplicate_column_raises_valueerror(self):
+        with pytest.raises(ValueError, match="specified more than once"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=["date:asc", "date:desc"],
+            )
+
+    def test_sort_keys_missing_colon_raises_valueerror(self):
+        with pytest.raises(ValueError, match="must be 'column:asc' or 'column:desc'"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=["date"],
+            )
+
+    def test_sort_keys_bad_direction_raises_valueerror(self):
+        with pytest.raises(ValueError, match="direction must be 'asc' or 'desc'"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=["date:ascending"],
+            )
+
+    def test_sort_keys_empty_column_raises_valueerror(self):
+        with pytest.raises(ValueError, match="column name is empty"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                sort_keys=[":desc"],
+            )
+
+    def test_sort_keys_overwrite_clear_range_raises_valueerror(self):
+        with pytest.raises(ValueError, match="clear_mode='range'"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="overwrite",
+                clear_mode="range",
+                sort_keys=["date:desc"],
+            )
+
+    def test_sort_keys_append_cell_range_raises_valueerror(self):
+        with pytest.raises(ValueError, match=r"append \+ cell_range"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="append",
+                cell_range="B2",
+                sort_keys=["date:desc"],
+            )
+
+    def test_sort_keys_append_clear_range_ok(self):
+        # clear_mode is ignored in append; must not raise
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            clear_mode="range",
+            sort_keys=["date:desc"],
+        )
+        assert op.sort_keys == ["date:desc"]
+
+    def test_sort_keys_direction_case_insensitive_init(self):
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            sort_keys=["date:DESC", "region:Asc"],
+        )
+        assert op.sort_keys == ["date:DESC", "region:Asc"]
+
+    def test_sort_keys_unknown_column_raises_in_execute(self, mock_hook, context):
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"name": "a", "value": 1}],
+            sort_keys=["missing:desc"],
+        )
+        with pytest.raises(ValueError, match="not found in headers"):
+            op.execute(context)
+
+    def test_sort_keys_column_mapping_name_ok_in_execute(self, mock_hook, context):
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"src": "2024-01-01"}],
+            column_mapping={"src": "date"},
+            sort_keys=["date:desc"],
+        )
+        # Post-mapping name "date" exists → no error
+        op.execute(context)
+
+    def test_sort_keys_requires_headers_raises_in_execute(self, mock_hook, context):
+        mock_hook.get_values.return_value = []
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[["a", "b"]],
+            has_headers=False,
+            sort_keys=["date:desc"],
+        )
+        with pytest.raises(ValueError, match="requires named headers"):
+            op.execute(context)
