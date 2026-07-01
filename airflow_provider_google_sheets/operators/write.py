@@ -186,16 +186,16 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 )
             if not sort_keys:
                 raise ValueError("sort_keys must be a non-empty list or None")
-            # Any clear_mode other than "sheet" performs a partial range clear
-            # in _execute_overwrite (only "sheet" does a full-sheet clear), so
-            # the guard must match that effective behaviour — not just the exact
-            # literal "range". A templated/typo'd value like "RANGE" or "range "
-            # would otherwise bypass this check yet still trigger a range-clear
-            # followed by a sortRange that desyncs neighbouring columns.
-            if write_mode == "overwrite" and clear_mode != "sheet":
+            # Parse-time guard against the plain literal "range". clear_mode IS a
+            # template field, so a templated value like "{{ ... }}" is a non-"sheet"
+            # literal at DAG-parse time — matching on "!= 'sheet'" here would falsely
+            # raise on such templates. The authoritative enforcement is the runtime
+            # guard in execute() (clear_mode != "sheet"), which runs AFTER Jinja
+            # rendering and catches "range", "RANGE", "range ", typos, and templated
+            # values that render to any non-"sheet" range-clear.
+            if write_mode == "overwrite" and clear_mode == "range":
                 raise ValueError(
-                    "sort_keys is not compatible with overwrite + a partial "
-                    "range clear (clear_mode != 'sheet', e.g. clear_mode='range'): "
+                    "sort_keys is not compatible with overwrite + clear_mode='range': "
                     "sorting across partial column ranges desyncs neighbouring columns"
                 )
             if self.cell_range and write_mode == "append":
@@ -551,17 +551,14 @@ class GoogleSheetsWriteOperator(BaseOperator):
 
         # Server-side sort (cell_range is already blocked in __init__ when set).
         if self.sort_keys:
-            # A physical header row exists at the table top only if we just
-            # wrote one this run, OR the table already had data AND this
-            # operator manages a header (has_headers and write_headers). When
-            # write_headers=False this operator NEVER writes a header row, so a
-            # non-empty sheet must NOT skip its first row — otherwise the first
-            # DATA row would be wrongly excluded from the sort. This mirrors the
-            # overwrite path (skip_header = write_headers and headers) and the
-            # merge path, keeping all three modes consistent and tied to the
-            # current config.
+            # A physical header row exists at the table top if we just wrote one
+            # this run (header_written_this_run), OR the sheet already had data
+            # and the table declares headers (has_headers). This is consistent
+            # with build_existing_key_index (which skips the existing first row
+            # whenever has_headers=True, independent of write_headers) and with
+            # the operator's has_headers model of existing-sheet header presence.
             skip_header = header_written_this_run or (
-                existing_row_count > 0 and self.has_headers and self.write_headers
+                existing_row_count > 0 and self.has_headers
             )
             end_row = (
                 (start_row - 1)
@@ -781,17 +778,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
             rows_after_merge = total_existing - total_deleted + len(append_rows)
             end_row = (table_start_row - 1) + rows_after_merge
             # A physical header row exists only if we just wrote one, or the
-            # sheet already had data AND this operator manages a header
-            # (has_headers and write_headers).
+            # sheet already had data AND the table declares headers (has_headers).
+            # This matches build_existing_key_index, where has_headers governs
+            # whether the existing first row is treated as a header (and thus
+            # skipped) — independent of write_headers.
             # `has_headers=False` (reachable via list[dict] input, which sets
             # `headers` so sort_keys passes the execute() guard while the sheet
             # itself has no header row) must NOT skip the first data row.
-            # `write_headers=False` means this operator never writes a header
-            # row, so a non-empty sheet must NOT skip its first row either
-            # (otherwise the first DATA row is wrongly excluded from the sort).
-            # Mirrors the append path and overwrite (write_headers and headers).
             skip_header = headers_just_written or (
-                bool(existing_keys_raw) and self.has_headers and self.write_headers
+                bool(existing_keys_raw) and self.has_headers
             )
             # Width contract: the sort range spans the table's declared/written
             # width — max(len(headers), widest row written this run). Cells to

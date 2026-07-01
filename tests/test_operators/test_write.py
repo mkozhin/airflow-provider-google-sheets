@@ -2406,18 +2406,22 @@ class TestSortKeysValidation:
                 sort_keys=["date:desc"],
             )
 
-    def test_sort_keys_overwrite_clear_non_sheet_raises_valueerror(self):
-        # Any clear_mode other than "sheet" does a partial range clear in
-        # _execute_overwrite, so the guard must fire on an arbitrary non-"sheet"
-        # value — not only the exact literal "range".
+    def test_sort_keys_overwrite_clear_non_sheet_raises_valueerror(self, mock_hook, context):
+        # The __init__ guard only raises on the exact literal "range" (to avoid
+        # false positives on templated clear_mode values that are non-"sheet"
+        # literals at DAG-parse time). Enforcement for an arbitrary non-"sheet"
+        # value happens at the execute() runtime guard, which runs after Jinja
+        # rendering and treats ANY clear_mode != "sheet" as a partial range clear.
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            clear_mode="partial",  # non-"sheet" literal: allowed at construction
+            data=[{"date": "2024-01-01", "region": "a"}],
+            sort_keys=["date:desc"],
+        )
         with pytest.raises(ValueError, match="clear_mode != 'sheet'"):
-            GoogleSheetsWriteOperator(
-                task_id="test",
-                spreadsheet_id=SPREADSHEET_ID,
-                write_mode="overwrite",
-                clear_mode="partial",
-                sort_keys=["date:desc"],
-            )
+            op.execute(context)
 
     def test_sort_keys_append_cell_range_raises_valueerror(self):
         with pytest.raises(ValueError, match=r"append \+ cell_range"):
@@ -3016,13 +3020,13 @@ class TestAppendSortKeys:
         assert specs[1]["dimensionIndex"] == 1  # region
         assert specs[1]["sortOrder"] == "ASCENDING"
 
-    def test_append_write_headers_false_nonempty_includes_first_row(self, mock_hook, context):
-        """write_headers=False + non-empty sheet + has_headers=True → first data
-        row INCLUDED in the sort. Since write_headers=False the operator writes
-        no header row, so it must not skip the top row (that would drop a real
-        data row from the sort). startRowIndex == table_start_row - 1 == 0."""
+    def test_append_write_headers_false_nonempty_skips_header(self, mock_hook, context):
+        """write_headers=False + non-empty sheet + has_headers=True → the existing
+        first row is treated as a header and SKIPPED. has_headers (not
+        write_headers) governs existing-sheet header presence, consistent with
+        build_existing_key_index. startRowIndex == table_start_row - 1 + 1 == 1."""
         mock_hook.get_values.return_value = [
-            ["2024-01-01", "a"],
+            ["date", "region"],
             ["2024-01-02", "b"],
         ]
         op = GoogleSheetsWriteOperator(
@@ -3041,9 +3045,9 @@ class TestAppendSortKeys:
         sort_range = _find_sort_range(mock_hook)
         assert sort_range is not None
         rng = sort_range["range"]
-        # existing 2 rows + 1 new = 3, first data row not skipped
+        # existing 2 rows + 1 new = 3, header row skipped → sort starts at row 1
         assert rng["endRowIndex"] == 3
-        assert rng["startRowIndex"] == 0
+        assert rng["startRowIndex"] == 1
 
     def test_append_sort_range_covers_wide_rows(self, mock_hook, context):
         """list[list] data rows wider than the header row: the sortRange must
@@ -3151,13 +3155,13 @@ class TestMergeSortKeys:
         assert rng["startRowIndex"] == 1
 
     def test_merge_sort_skip_header_write_headers_false_nonempty(self, mock_hook, context):
-        """write_headers=False + non-empty sheet → first row NOT skipped.
+        """write_headers=False + non-empty sheet + has_headers=True → header SKIPPED.
 
-        Corrected semantics (was a bug): when write_headers=False this operator
-        never writes a header row, so it cannot assume one exists. skip_header is
-        now tied to the current config (has_headers AND write_headers), matching
-        the overwrite path (write_headers and headers). The first row must be
-        included in the sort → startRowIndex == table_start_row - 1 == 0.
+        has_headers (not write_headers) governs whether the existing first row is
+        a header, matching build_existing_key_index (which skips the existing
+        first row whenever has_headers=True, independent of write_headers). So the
+        existing header row is excluded from the sort → startRowIndex ==
+        table_start_row - 1 + 1 == 1.
         """
         mock_hook.get_values.return_value = [["id"], ["A"], ["B"]]
         op = GoogleSheetsWriteOperator(
@@ -3178,8 +3182,8 @@ class TestMergeSortKeys:
         rng = sort_range["range"]
         # existing 3 rows + 1 appended (new key C) = 4
         assert rng["endRowIndex"] == 4
-        # write_headers=False → operator manages no header → first row included
-        assert rng["startRowIndex"] == 0
+        # has_headers=True → existing first row is a header → skipped
+        assert rng["startRowIndex"] == 1
 
     def test_merge_sort_skip_header_empty_sheet_no_headers(self, mock_hook, context):
         """write_headers=False + empty sheet → no header row → do not skip."""
