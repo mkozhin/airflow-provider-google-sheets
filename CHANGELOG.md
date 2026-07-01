@@ -7,6 +7,10 @@
 
 - **`sort_keys`** parameter to `GoogleSheetsWriteOperator` (default `None`) — optional list of sort specs applied server-side via a single `sortRange` `batchUpdate` after the write completes, in any write mode. Each item is `"column:asc"` or `"column:desc"` (direction case-insensitive), e.g. `sort_keys=["date:desc", "region:asc"]`. Column names refer to the headers **after** `column_mapping`. Requires named headers and only sorts the table's own columns. Format is validated at DAG-load time. Not compatible with `overwrite` + `clear_mode="range"` or with `append` + `cell_range`
 
+### Fixed
+
+- **Transient `404` from the Google Sheets API** (a `404` on a spreadsheet that really exists, observed after heavy writes) no longer fails the task in the idempotent write modes. `GoogleSheetsWriteOperator` now re-runs the whole operation on a transient 404 for `merge`/`overwrite` and for `create_sheet_if_missing` setup (all idempotent on full re-run). The `append` mode and the read methods remain fail-fast (append is not idempotent; a wrong `spreadsheet_id` still fails instantly). Controlled by two new operator params: `transient_404_max_retries` (default `3`, `0` disables) and `transient_404_base_delay` (default `5.0`s, exponential backoff). A non-404 `HttpError` is re-raised immediately
+
 
 ## v0.12.0
 

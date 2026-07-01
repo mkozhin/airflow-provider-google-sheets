@@ -353,6 +353,8 @@ multi_sorted = GoogleSheetsWriteOperator(
 | `partition_value` | str | `None` | Value to match against `partition_by` column. Required when `partition_by` is set |
 | `column_mapping` | dict | `None` | Rename headers before writing: `{"source_col": "Sheet Header"}`. Applied after all filtering — `merge_key`, `partition_by`, and `schema` always reference the **original** column names from the input data |
 | `sort_keys` | list[str] | `None` | Sort the table server-side after writing (any write mode). Items are `"column:asc"` / `"column:desc"` (direction case-insensitive), e.g. `["date:desc", "region:asc"]`. Column names refer to headers **after** `column_mapping`. Requires named headers; only the table's own columns are sorted. Format validated at DAG-load time. Not compatible with `overwrite` + `clear_mode="range"` or `append` + `cell_range` |
+| `transient_404_max_retries` | int | `3` | Number of times to re-run the **whole** operation when Google Sheets returns a transient `404` on a spreadsheet that really exists (observed after heavy writes). Only applies to the idempotent modes — `overwrite` and `merge` — and to `create_sheet_if_missing` setup; `append` and read paths stay fail-fast. A non-404 `HttpError` is re-raised immediately. Must be a non-bool `int >= 0`; `0` disables the retry |
+| `transient_404_base_delay` | float | `5.0` | Base delay in seconds for the exponential backoff between transient-404 re-runs (delay = `base_delay * 2 ** (attempt - 1)`). Must be a non-bool real `>= 0`. Worst case with defaults: up to `1 + 3 = 4` full re-runs with `5 + 10 + 20 = 35`s of backoff between them — keep the Airflow `execution_timeout` comfortably above this |
 
 **Data input formats:**
 - `list[dict]` — headers auto-detected from keys

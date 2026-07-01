@@ -191,11 +191,11 @@ fail-fast (append вне scope).
 
 ### Task 4: Finalization (checklist, не implementation-task)
 
-- [ ] обновить `readme.md` и `readme_ru.md`: описать `transient_404_max_retries`, `transient_404_base_delay` в параметрах `GoogleSheetsWriteOperator`
-- [ ] `python -m pytest tests/ -v` (repo-local путь; НЕ абсолютный `/Users/...`)
-- [ ] все тесты зелёные, включая ранее существующие
-- [ ] обновить `CHANGELOG.md` (unreleased/fixed: operation-level 404-retry для merge/overwrite/ensure_sheet; append и read-методы остаются fail-fast)
-- [ ] переместить план в `docs/plans/completed/`
+- [x] обновить `readme.md` и `readme_ru.md`: описать `transient_404_max_retries`, `transient_404_base_delay` в параметрах `GoogleSheetsWriteOperator`
+- [x] `python -m pytest tests/ -v` (repo-local путь; НЕ абсолютный `/Users/...`)
+- [x] все тесты зелёные, включая ранее существующие (570 passed)
+- [x] обновить `CHANGELOG.md` (unreleased/fixed: operation-level 404-retry для merge/overwrite/ensure_sheet; append и read-методы остаются fail-fast)
+- [x] переместить план в `docs/plans/completed/` (перемещает harness после всех фаз)
 
 ## Post-Completion
 
