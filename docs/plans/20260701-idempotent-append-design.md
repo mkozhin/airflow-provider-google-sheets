@@ -274,16 +274,16 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py`
 
-- [ ] В `_execute_overwrite`, `_execute_append` (легаси-ветка тоже), `_execute_merge`
+- [x] В `_execute_overwrite`, `_execute_append` (легаси-ветка тоже), `_execute_merge`
       добавить в возвращаемый dict `"transient_404_retries": self._transient_404_retries`.
-- [ ] В `execute()` после получения результата операции: если
+- [x] В `execute()` после получения результата операции: если
       `self._transient_404_retries > 0` — INFO-лог
       `"<write_mode> completed after %d transient-404 retries"`.
-- [ ] Тест: return-dict overwrite/append/merge содержит `transient_404_retries: 0`
+- [x] Тест: return-dict overwrite/append/merge содержит `transient_404_retries: 0`
       без ретраев.
-- [ ] Тест: при инъекции 404 return-dict содержит `transient_404_retries: K` (K>0)
+- [x] Тест: при инъекции 404 return-dict содержит `transient_404_retries: K` (K>0)
       и пишется INFO-строка (проверить через `caplog`).
-- [ ] Прогнать тесты — должны пройти перед Task 3.
+- [x] Прогнать тесты — должны пройти перед Task 3.
 
 ### Task 3: opt-out `append_insert_rows` + выделение легаси-пути (рефактор без смены поведения)
 

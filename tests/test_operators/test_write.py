@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -4068,6 +4069,110 @@ class TestTransient404Counter:
         _run_with_fake(hook, op, context)
 
         assert op._transient_404_retries == 0
+
+
+class TestTransient404ReturnDict:
+    """The transient_404_retries field is surfaced in every mode's return dict,
+    and an INFO summary is emitted when at least one re-run happened."""
+
+    def test_overwrite_return_dict_zero_without_404(self, context):
+        sheet = FakeSheet(grid=[["name", "n"], ["stale-1", 91]])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"name": "Al", "n": 1}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["mode"] == "overwrite"
+        assert result["transient_404_retries"] == 0
+
+    def test_append_return_dict_zero_without_404(self, context):
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"name": "Al", "n": 2}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["mode"] == "append"
+        assert result["transient_404_retries"] == 0
+
+    def test_merge_return_dict_zero_without_404(self, context):
+        sheet = FakeSheet(
+            grid=[["date", "value"], ["2026-01-14", "old-A"]]
+        )
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[{"date": "2026-01-14", "value": "new-A"}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["mode"] == "merge"
+        assert result["transient_404_retries"] == 0
+
+    def test_overwrite_return_dict_counts_404_and_logs_info(self, context, caplog):
+        sheet = FakeSheet(grid=[["name", "n"], ["stale-1", 91]])
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"name": "Al", "n": 1}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        with caplog.at_level(
+            logging.INFO,
+            logger="airflow_provider_google_sheets.operators.write",
+        ):
+            result = _run_with_fake(hook, op, context)
+
+        assert result["transient_404_retries"] == 1
+        assert "overwrite completed after 1 transient-404 retries" in caplog.text
+
+    def test_merge_return_dict_counts_404_and_logs_info(self, context, caplog):
+        sheet = FakeSheet(
+            grid=[["date", "value"], ["2026-01-14", "old-A"]]
+        )
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("append_values", status=404, when="before", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="merge",
+            merge_key="date",
+            data=[{"date": "2026-01-15", "value": "new-B"}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        with caplog.at_level(
+            logging.INFO,
+            logger="airflow_provider_google_sheets.operators.write",
+        ):
+            result = _run_with_fake(hook, op, context)
+
+        assert result["transient_404_retries"] >= 1
+        assert "merge completed after" in caplog.text
+        assert "transient-404 retries" in caplog.text
 
 
 class TestTransient404EnsureSheet:

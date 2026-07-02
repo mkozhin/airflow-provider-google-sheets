@@ -486,16 +486,16 @@ class GoogleSheetsWriteOperator(BaseOperator):
                     )
 
         if self.write_mode == "overwrite":
-            return self._run_with_transient_404_retry(
+            result = self._run_with_transient_404_retry(
                 lambda: self._execute_overwrite(hook, headers, rows),
                 label="overwrite",
             )
         elif self.write_mode == "append":
             # append is NOT idempotent — a re-run would double-write, so 404
             # stays fail-fast here (see plan / idempotent-append design).
-            return self._execute_append(hook, headers, rows)
+            result = self._execute_append(hook, headers, rows)
         elif self.write_mode in ("merge", "smart_merge"):
-            return self._run_with_transient_404_retry(
+            result = self._run_with_transient_404_retry(
                 lambda: self._execute_merge(
                     hook, headers, rows, original_headers=original_headers
                 ),
@@ -503,6 +503,16 @@ class GoogleSheetsWriteOperator(BaseOperator):
             )
         else:
             raise ValueError(f"Unknown write_mode: '{self.write_mode}'")
+
+        # Surface the transient-404 retry count as a single INFO summary when
+        # any re-run happened (per-attempt WARNINGs are already logged).
+        if self._transient_404_retries > 0:
+            logger.info(
+                "%s completed after %d transient-404 retries",
+                self.write_mode,
+                self._transient_404_retries,
+            )
+        return result
 
     # ------------------------------------------------------------------
     # overwrite
@@ -607,7 +617,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
             )
 
         logger.info("Overwrite complete: %d rows written", total_written)
-        return {"mode": "overwrite", "rows_written": total_written}
+        return {
+            "mode": "overwrite",
+            "rows_written": total_written,
+            "transient_404_retries": self._transient_404_retries,
+        }
 
     # ------------------------------------------------------------------
     # append
@@ -708,7 +722,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
             )
 
         logger.info("Append complete: %d rows written", total_written)
-        return {"mode": "append", "rows_written": total_written}
+        return {
+            "mode": "append",
+            "rows_written": total_written,
+            "transient_404_retries": self._transient_404_retries,
+        }
 
     # ------------------------------------------------------------------
     # smart merge
@@ -930,7 +948,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
             )
 
         logger.info("Merge complete: %s", stats)
-        return {"mode": "merge", **stats}
+        return {
+            "mode": "merge",
+            **stats,
+            "transient_404_retries": self._transient_404_retries,
+        }
 
     # ------------------------------------------------------------------
     # internal utilities
