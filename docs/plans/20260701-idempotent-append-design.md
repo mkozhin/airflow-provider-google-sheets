@@ -109,10 +109,10 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 
 **Механика дефолтного (позиционного) append:**
 
-1. Определить оконный диапазон столбцов: если задан `cell_range` — из него
-   (start_col..end_col + верхняя строка); иначе start_col/start_row из
-   `table_start`, ширина = `len(headers)` (или max ширина строк payload при
-   отсутствии headers).
+1. Определить оконный диапазон столбцов через `A1Range.parse(...)` (Task 0):
+   если задан `cell_range` — из него (start_col..end_col + верхняя строка);
+   иначе start_col/start_row из `table_start`, ширина = `len(headers)` (или max
+   ширина строк payload при отсутствии headers).
 2. Прочитать `E0` — абсолютный номер последней непустой строки в оконном
    диапазоне от верхней строки таблицы вниз (та же логика, что в sort-ветке:
    `any(str(c).strip() for c in r)`); если контента нет — `E0 = start_row - 1`.
@@ -152,8 +152,10 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
    - `skip_header = write_header_flag or (E0 >= start_row and self.has_headers)`;
    - `end_row = (start_row - 1) + existing_row_count + (1 if write_header_flag
      else 0) + N` — что при `write_header_flag=False` эквивалентно `E0 + N`.
-   Эти формулы зафиксировать в коде и покрыть тестом на диапазон sort (start/end
-   row + ширина) под позиционным путём.
+   Эти формулы зафиксировать в коде как конструирование `WrittenExtent`
+   (Task 5, см. CONTEXT.md «Written Extent») и покрыть прямыми unit-тестами
+   свойств значения + тестом на диапазон sort (start/end row + ширина) под
+   позиционным путём.
 
 **Легаси-путь (`append_insert_rows=True`)** — целиком текущее тело
 `_execute_append` (через `hook.append_values`), вызывается напрямую, **без**
@@ -202,6 +204,46 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
   прогон боевого DAG — вне репозитория.
 
 ## Implementation Steps
+
+### Task 0: Value-тип `A1Range` — единый носитель A1-математики (architecture review 2026-07-02, кандидат №1)
+
+> Рефактор эквивалентной замены, поведение НЕ меняется. Вводится ДО остальных
+> задач, чтобы позиционный append (Task 4) писался сразу на правильном понятии:
+> Task 4 нужен парсер end-столбца, которого в write.py нет — при том что он уже
+> трижды написан в других местах (manage.py:349–358 и 365–370 дословно дважды,
+> tests/test_write.py:3511 `_parse_range`).
+
+**Files:**
+- Create: `airflow_provider_google_sheets/utils/a1.py`
+- Create: `tests/test_utils/test_a1.py`
+- Modify: `airflow_provider_google_sheets/operators/write.py`
+- Modify: `tests/test_operators/test_write.py` (только если потребуется — см. ниже)
+
+- [ ] Создать `utils/a1.py` с frozen dataclass `A1Range`: поля
+      `sheet: str | None`, `start_col: str`, `start_row: int`,
+      `end_col: str | None`, `end_row: int | None`; методы
+      `parse(text, sheet=None)` (обе границы; открытые диапазоны `"C3:F"` →
+      `end_row=None`; голая ячейка `"C3"` → end-поля None; sheet-префикс из
+      текста или аргумента), `width()` (C..F → 4; None если end_col нет),
+      `col_at(offset)`, `cell(row)` (→ `"Sheet1!C7"`), `render()`. Конверсии
+      букв⇄индексов (логика нынешних `_column_letter_to_index` /
+      `_index_to_column_letter`, включая `AA+`) — внутрь модуля как функции.
+- [ ] Прямые unit-тесты `tests/test_utils/test_a1.py` (pure, без mock_hook):
+      parse простых/префиксных/открытых диапазонов и одиночных ячеек;
+      round-trip render; `width`/`col_at`/`cell`; границы `Z→AA→AAA`;
+      пустая строка/мусор → ValueError.
+- [ ] Мигрировать `operators/write.py` на `A1Range`: статические
+      `_column_letter_to_index` / `_index_to_column_letter` /
+      `_parse_range_start` оставить как тонкие делегаты в `utils/a1`
+      (существующие тесты `TestColumnLetterToIndex` / `TestParseRangeStart` /
+      `TestColumnLetterConversion` остаются зелёными без правок), а их
+      РЕАЛИЗАЦИЮ перенести в `utils/a1`; inline-рендеры
+      `f"{prefix}{col}{row}"` в местах, где уже есть распарсенные
+      col/row, заменить на `A1Range`/`col_at`/`cell` там, где это не раздувает
+      diff (минимум — оба места вычисления `end_col` в overwrite/append:
+      write.py:558–560, 632–635).
+- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное (поведение не
+      изменилось) перед Task 1.
 
 ### Task 1: Счётчик 404-ретраев в `_run_with_transient_404_retry` + инициализация
 
@@ -271,10 +313,9 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - [ ] Реализовать `_execute_append_positional(...)` **без sort**: оконный диапазон
       столбцов (`cell_range` → start/end col + верхняя строка, ширина
       `max(окно, max ширина payload)` с защитой от пустоты; иначе `table_start` +
-      ширина данных). ⚠️ В операторе есть только `_parse_range_start` (start col/row,
-      write.py:496) — для `cell_range`-ветки нужен новый хелпер парсинга **end-столбца**
-      (напр. `"C3:E"` → end col `E`; образец логики — `_parse_range` в тестах);
-      чтение `E0` (последняя непустая строка окна, иначе
+      ширина данных). Парсинг окна — через `A1Range.parse(...)` из Task 0
+      (`width()` / `col_at()` дают end-столбец и ширину; отдельный хелпер не
+      нужен); чтение `E0` (последняя непустая строка окна, иначе
       `start_row-1`) в локальную переменную, обёрнутое в
       `_run_with_transient_404_retry(..., label="append")`;
       `write_header_flag`/`data_start_abs` из до-мутационного `E0`; `_write`
@@ -322,24 +363,53 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       тронуты); дефолтный append использует `update_values`, а не `append_values`.
 - [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 5.
 
-### Task 5: Интеграция sort в позиционный append + миграция sort-тестов
+### Task 5: `WrittenExtent` + интеграция sort в позиционный append + миграция sort-тестов
+
+> Включает кандидата №2 архитектурного ревью 2026-07-02 (решение: делать
+> внутри этой задачи, чтобы sort-тесты мигрировались один раз, а формулы §6
+> не становились четвёртой копией). Термин — в CONTEXT.md («Written Extent»).
 
 **Files:**
+- Create: `airflow_provider_google_sheets/utils/write_extent.py`
+- Create: `tests/test_utils/test_write_extent.py`
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py`
 
+- [ ] Создать `utils/write_extent.py` с frozen dataclass `WrittenExtent`:
+      поля `start_row: int` (1-based верх таблицы), `header_present: bool`
+      (физическая строка заголовка на листе после операции — записанная этим
+      прогоном ИЛИ уже существовавшая при `has_headers`), `data_rows: int`,
+      `width: int` (max(len(headers), widest written row)); свойства
+      `sort_start` (0-based, header учтён), `sort_end` (0-based exclusive,
+      = прежний `end_row`), `num_columns` (= width). Width-contract
+      («сортируем только записанную ширину; правее — чужие данные») — ОДИН раз
+      в docstring класса (заменяет 3 дублированных ~10-строчных комментария:
+      write.py:683–694, 905–916, 984–994).
+- [ ] Прямые unit-тесты `tests/test_utils/test_write_extent.py`: формулы §6 как
+      свойства значения — пустой лист + заголовок, непустой c/без заголовка,
+      `E0`-конструирование для позиционного append (`data_rows =
+      max(0, E0-(start_row-1)) + N`), пустые данные (`sort_start >= sort_end`
+      → сортировать нечего).
+- [ ] Переписать `_execute_sort` на приём `WrittenExtent` (+hook, headers,
+      sheet_id, start_col) вместо 6 позиционных величин; no-op-guard
+      (`data_start >= end_row`) выразить через `sort_start >= sort_end`.
+- [ ] Сконструировать `WrittenExtent` во всех трёх режимах из уже вычисленных
+      ими величин (overwrite: write.py:586–603; merge: 891–926; легаси-append:
+      667–704) — механическая замена тройки `skip_header`/`end_row`/
+      `num_columns`, формулы НЕ меняются, дублированные width-contract
+      комментарии удаляются.
 - [ ] Реализовать sort-хвост в `_execute_append_positional` как последний шаг
-      **вне** retried-блока записи, по формулам из Solution Overview §6
-      (`existing_row_count = max(0, E0 - (start_row-1))`,
-      `skip_header = write_header_flag or (E0 >= start_row and has_headers)`,
-      `end_row = (start_row-1) + existing_row_count + (1 if write_header_flag
-      else 0) + N`); убрать временное делегирование в легаси при `sort_keys`.
+      **вне** retried-блока записи: extent конструируется из `E0` /
+      `write_header_flag` / `N` (формулы §6); убрать временное делегирование в
+      легаси при `sort_keys`.
 - [ ] Мигрировать `TestAppendSortKeys` (~2911–3050) на позиционный путь
       (grid-assert / проверка диапазона sort).
 - [ ] Тест: диапазон sort (start/end row + ширина) под позиционным путём
       соответствует эталонным кейсам; 404 на записи + затем sort не приводит к
       повторной записи поверх отсортированных строк.
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 6.
+- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 6
+      (включая незатронутые sort-тесты overwrite/merge — их формулы не
+      изменились, только носитель).
 
 ### Task 6: execute()-комментарий + актуализация docstrings + integration-тест
 
@@ -403,6 +473,16 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Опубликовать новую версию провайдера и обновить на `realcombi.mgcom.ru`.
 - (Опционально) добавить пример keyless-журнала на дефолтном append в
   `examples/`, если появится боевой DAG.
+
+**Follow-up рефакторы (решения architecture review 2026-07-02, вне этого плана):**
+- `A1Range` этап 2: мигрировать `read.py` и `manage.py` (убивает дословно
+  задублированный парсинг в `UniqueValuesOperator`, manage.py:349–358 ≡
+  365–370) — см. ADR-0002.
+- Глубокие методы hook (`delete_rows`/`sort_rows`/`clear_row_formatting`) +
+  унификация append-ноги merge — при следующем касании merge:
+  `docs/plans/20260702-deep-hook-methods-design.md`.
+- Политика «решения записи — чистые функции»:
+  `docs/plans/20260702-pure-write-planning-design.md`.
 
 **Manual verification:**
 - Прогнать боевой append-DAG (при появлении) и убедиться, что WARNING-строки
