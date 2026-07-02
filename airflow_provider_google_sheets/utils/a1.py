@@ -59,6 +59,30 @@ def col_offset(start_col: str, offset: int) -> str:
     return index_to_column_letter(column_letter_to_index(start_col) + offset)
 
 
+def unquote_sheet(token: str) -> str:
+    """Return the raw sheet (tab) *title* from an A1 sheet token.
+
+    In A1 notation a sheet name that contains spaces or other special
+    characters is wrapped in single quotes, and a literal single quote inside
+    the name is escaped by doubling it (``''``).  ``A1Range.parse`` keeps the
+    sheet token exactly as written (quotes included) so that rendering it back
+    into an A1 prefix stays valid, but the Sheets *grid* operations
+    (``ensure_rows``, ``get_sheet_id``) need the actual tab title with no
+    quoting.  This undoes the A1 quoting:
+
+        ``"'Data Sheet'"``   → ``"Data Sheet"``
+        ``"Sheet1"``          → ``"Sheet1"`` (unquoted, returned as-is)
+        ``"'O''Brien'"``      → ``"O'Brien"`` (doubled quote unescaped)
+
+    A token that is not wrapped in matching single quotes is returned
+    unchanged.
+    """
+    t = token.strip()
+    if len(t) >= 2 and t.startswith("'") and t.endswith("'"):
+        return t[1:-1].replace("''", "'")
+    return t
+
+
 def parse_range_start(range_str: str) -> tuple[str, int]:
     """Extract the start column and row from an A1-notation range, leniently.
 

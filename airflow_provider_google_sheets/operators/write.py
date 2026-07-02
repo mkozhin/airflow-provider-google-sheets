@@ -19,6 +19,7 @@ from airflow_provider_google_sheets.utils.a1 import (
     column_letter_to_index,
     index_to_column_letter,
     parse_range_start,
+    unquote_sheet,
 )
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
 from airflow_provider_google_sheets.utils.merge_key import resolve_merge_key_schema
@@ -58,7 +59,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
         gcp_conn_id: Airflow Connection ID.
         spreadsheet_id: Target spreadsheet ID.
         sheet_name: Target sheet (tab) name.
-        cell_range: Target A1 range (used by *overwrite*).
+        cell_range: Target A1 range. Used by *overwrite* as the write range;
+            in the default *append* path it bounds the positional column
+            *window* (its end-row is ignored) and an optional sheet prefix
+            (e.g. ``"'Data Sheet'!B2:C"``) selects the target tab.
         write_mode: ``"overwrite"``, ``"append"`` or ``"merge"`` (alias: ``"smart_merge"``).
         data: Inline data — ``list[list]``, ``list[dict]``, or a file path.
         data_xcom_task_id: Pull data from this task's XCom instead.
@@ -724,6 +728,17 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # (ensure_rows, sort sheet-id) must key off this same effective sheet,
         # else the ranges read/write "Data" while the grid ops grow/sort the
         # first tab.
+        #
+        # Two DIFFERENT spellings of that sheet are needed. When the token comes
+        # from cell_range it is A1-quoted for names with spaces
+        # (``'Data Sheet'!B2:C`` → sheet token ``'Data Sheet'``):
+        #   * ``effective_sheet`` keeps the A1 form so the ``{sheet}!`` range
+        #     prefix stays valid, and
+        #   * ``grid_sheet`` is the raw, unquoted tab title the grid ops
+        #     (``ensure_rows`` / ``get_sheet_id``) match against — passing the
+        #     quoted form there fails to find the tab.
+        # When the sheet comes from ``self.sheet_name`` it is already a raw
+        # title, so unquoting is a no-op.
         if self.cell_range:
             window = A1Range.parse(self.cell_range, sheet=self.sheet_name)
             start_col = window.start_col
@@ -735,6 +750,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
             window_width = 0
             effective_sheet = self.sheet_name
         prefix = f"{effective_sheet}!" if effective_sheet else ""
+        grid_sheet = unquote_sheet(effective_sheet) if effective_sheet else None
 
         width = max(window_width, WrittenExtent.row_width(headers, rows))
 
@@ -766,9 +782,9 @@ class GoogleSheetsWriteOperator(BaseOperator):
             # Grow the sheet to fit the header (if any) and all data rows.
             if num_rows:
                 required = data_start_abs + num_rows - 1
-                hook.ensure_rows(self.spreadsheet_id, effective_sheet, required)
+                hook.ensure_rows(self.spreadsheet_id, grid_sheet, required)
             elif write_header_flag:
-                hook.ensure_rows(self.spreadsheet_id, effective_sheet, start_row)
+                hook.ensure_rows(self.spreadsheet_id, grid_sheet, start_row)
 
             if write_header_flag:
                 header_range = f"{prefix}{start_col}{start_row}"
@@ -808,11 +824,12 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 width=width,
             )
             # Resolve the sort target from the SAME effective sheet used for the
-            # grid ops above. When cell_range embeds a sheet, self.sheet_name is
-            # None and _get_sheet_id would wrongly fall back to the first tab.
-            if effective_sheet:
+            # grid ops above (raw, unquoted title). When cell_range embeds a
+            # sheet, self.sheet_name is None and _get_sheet_id would wrongly
+            # fall back to the first tab.
+            if grid_sheet:
                 sort_sheet_id = hook.get_sheet_id(
-                    self.spreadsheet_id, effective_sheet
+                    self.spreadsheet_id, grid_sheet
                 )
             else:
                 sort_sheet_id = self._get_sheet_id(hook)

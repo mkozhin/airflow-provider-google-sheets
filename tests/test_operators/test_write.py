@@ -4574,6 +4574,42 @@ class TestAppendPositional:
                 f"ensure_rows targeted {call[0][1]!r}, not the 'Data' tab"
             )
 
+    def test_cell_range_quoted_sheet_prefix_ranges_and_grid_ops(
+        self, mock_hook, context
+    ):
+        """Regression: a quoted A1 sheet name with a space
+        (cell_range="'Data Sheet'!B2:C") must keep the QUOTED form in every A1
+        range string (so the ranges stay valid) while passing the UNQUOTED tab
+        title 'Data Sheet' to the grid ops (ensure_rows / get_sheet_id) — the
+        quoted title would never match the real tab."""
+        mock_hook.get_values.return_value = []  # empty window → needs growth
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            cell_range="'Data Sheet'!B2:C",
+            data=[["x", "y"]],
+            has_headers=False,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        # A1 range strings keep the quoted prefix.
+        read_ranges = [c[0][1] for c in mock_hook.get_values.call_args_list]
+        write_ranges = [c[0][1] for c in mock_hook.update_values.call_args_list]
+        assert read_ranges and write_ranges
+        for rng in read_ranges + write_ranges:
+            assert rng.startswith("'Data Sheet'!"), (
+                f"range {rng!r} lost the quoted 'Data Sheet' prefix"
+            )
+
+        # Grid ops receive the raw, unquoted tab title.
+        assert mock_hook.ensure_rows.call_count >= 1
+        for call in mock_hook.ensure_rows.call_args_list:
+            assert call[0][1] == "Data Sheet", (
+                f"ensure_rows targeted {call[0][1]!r}, not the unquoted title"
+            )
+
     def test_idempotency_404_mid_batch_no_dupes(self, context):
         """404 after the first data batch → whole write re-runs positionally →
         final grid is exactly right, no duplicated rows."""
@@ -4936,4 +4972,3 @@ class TestAppendPositionalExecuteIntegration:
             ["c", 3],
             ["d", 4],
         ]
-

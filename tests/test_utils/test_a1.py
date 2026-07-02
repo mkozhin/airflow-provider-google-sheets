@@ -7,7 +7,30 @@ from airflow_provider_google_sheets.utils.a1 import (
     column_letter_to_index,
     index_to_column_letter,
     parse_range_start,
+    unquote_sheet,
 )
+
+
+class TestUnquoteSheet:
+    def test_unquoted_returned_as_is(self):
+        assert unquote_sheet("Sheet1") == "Sheet1"
+
+    def test_quoted_name_with_space_is_unwrapped(self):
+        assert unquote_sheet("'Data Sheet'") == "Data Sheet"
+
+    def test_doubled_single_quote_is_unescaped(self):
+        assert unquote_sheet("'O''Brien'") == "O'Brien"
+
+    def test_no_sheet_token_stays_intact(self):
+        # A bare unquoted title with no special chars is untouched.
+        assert unquote_sheet("Data") == "Data"
+
+    def test_surrounding_whitespace_is_stripped(self):
+        assert unquote_sheet("  'Data Sheet'  ") == "Data Sheet"
+
+    def test_lone_quote_char_is_not_treated_as_wrapper(self):
+        # A single ``'`` is not a matching pair — returned as-is.
+        assert unquote_sheet("'") == "'"
 
 
 class TestColumnLetterToIndex:
