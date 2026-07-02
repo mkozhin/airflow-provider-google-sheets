@@ -219,7 +219,7 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py` (только если потребуется — см. ниже)
 
-- [ ] Создать `utils/a1.py` с frozen dataclass `A1Range`: поля
+- [x] Создать `utils/a1.py` с frozen dataclass `A1Range`: поля
       `sheet: str | None`, `start_col: str`, `start_row: int`,
       `end_col: str | None`, `end_row: int | None`; методы
       `parse(text, sheet=None)` (обе границы; открытые диапазоны `"C3:F"` →
@@ -228,11 +228,11 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       `col_at(offset)`, `cell(row)` (→ `"Sheet1!C7"`), `render()`. Конверсии
       букв⇄индексов (логика нынешних `_column_letter_to_index` /
       `_index_to_column_letter`, включая `AA+`) — внутрь модуля как функции.
-- [ ] Прямые unit-тесты `tests/test_utils/test_a1.py` (pure, без mock_hook):
+- [x] Прямые unit-тесты `tests/test_utils/test_a1.py` (pure, без mock_hook):
       parse простых/префиксных/открытых диапазонов и одиночных ячеек;
       round-trip render; `width`/`col_at`/`cell`; границы `Z→AA→AAA`;
       пустая строка/мусор → ValueError.
-- [ ] Мигрировать `operators/write.py` на `A1Range`: статические
+- [x] Мигрировать `operators/write.py` на `A1Range`: статические
       `_column_letter_to_index` / `_index_to_column_letter` /
       `_parse_range_start` оставить как тонкие делегаты в `utils/a1`
       (существующие тесты `TestColumnLetterToIndex` / `TestParseRangeStart` /
@@ -247,7 +247,7 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       col/row, заменить на `A1Range`/`col_at`/`cell` там, где это не раздувает
       diff (минимум — оба места вычисления `end_col` в overwrite/append:
       write.py:558–560, 632–635).
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное (поведение не
+- [x] Прогнать `python -m pytest tests/ -q` — всё зелёное (поведение не
       изменилось) перед Task 1.
 
 ### Task 1: Счётчик 404-ретраев в `_run_with_transient_404_retry` + инициализация

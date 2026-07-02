@@ -13,6 +13,12 @@ from airflow.models import BaseOperator
 from googleapiclient.errors import HttpError
 
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
+from airflow_provider_google_sheets.utils.a1 import (
+    A1Range,
+    column_letter_to_index,
+    index_to_column_letter,
+    parse_range_start,
+)
 from airflow_provider_google_sheets.utils.data_formats import normalize_input_data
 from airflow_provider_google_sheets.utils.merge_key import resolve_merge_key_schema
 from airflow_provider_google_sheets.utils.merge_planner import (
@@ -496,22 +502,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
     def _parse_range_start(range_str: str) -> tuple[str, int]:
         """Extract the start column and row from an A1-notation range.
 
-        Examples:
-            ``"B2:D10"`` → ``("B", 2)``
-            ``"Sheet1!C5:F"`` → ``("C", 5)``
-            ``"A1"`` → ``("A", 1)``
-
-        When no row number is present, defaults to ``1``.
+        Thin delegate to :func:`utils.a1.parse_range_start` (lenient: missing
+        column defaults to ``"A"``, missing row to ``1``).
         """
-        r = range_str
-        if "!" in r:
-            r = r.split("!", 1)[1]
-        # Take only the left part (before ':')
-        left = r.split(":")[0]
-        col = "".join(c for c in left if c.isalpha()) or "A"
-        row_str = "".join(c for c in left if c.isdigit())
-        row = int(row_str) if row_str else 1
-        return col, row
+        return parse_range_start(range_str)
 
     @staticmethod
     def _parse_sort_spec(spec: str) -> tuple[str, str]:
@@ -555,8 +549,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
             hook.clear_values(self.spreadsheet_id, clear_range)
         else:
             # clear_mode == "range": clear only the data columns
-            start_col_idx = self._column_letter_to_index(start_col)
-            end_col = self._index_to_column_letter(start_col_idx + num_data_cols - 1) if num_data_cols else start_col
+            window = A1Range.parse(f"{start_col}{start_row_num}")
+            end_col = window.col_at(num_data_cols - 1) if num_data_cols else start_col
             clear_range = f"{prefix}{start_col}{start_row_num}:{end_col}"
             logger.info("Clearing range %s", clear_range)
             hook.clear_values(self.spreadsheet_id, clear_range)
@@ -629,8 +623,8 @@ class GoogleSheetsWriteOperator(BaseOperator):
             # have internal gaps and Sheets trims trailing empties, so read
             # the full table width and take the last row that has any
             # non-empty cell.
-            start_col_idx = self._column_letter_to_index(start_col)
-            end_col = self._index_to_column_letter(start_col_idx + len(headers) - 1)
+            window = A1Range.parse(f"{start_col}{start_row}")
+            end_col = window.col_at(len(headers) - 1)
             existing_block = hook.get_values(
                 self.spreadsheet_id, f"{prefix}{start_col}{start_row}:{end_col}"
             )
@@ -1027,24 +1021,14 @@ class GoogleSheetsWriteOperator(BaseOperator):
     def _column_letter_to_index(letter: str) -> int:
         """Convert an A1-notation column letter to a 0-based index.
 
-        A → 0, B → 1, … Z → 25, AA → 26, etc.
+        Thin delegate to :func:`utils.a1.column_letter_to_index`.
         """
-        result = 0
-        for ch in letter.upper():
-            result = result * 26 + (ord(ch) - ord("A") + 1)
-        return result - 1
+        return column_letter_to_index(letter)
 
     @staticmethod
     def _index_to_column_letter(index: int) -> str:
         """Convert a 0-based column index to an A1-notation letter.
 
-        0 → A, 1 → B, … 25 → Z, 26 → AA, etc.
+        Thin delegate to :func:`utils.a1.index_to_column_letter`.
         """
-        result = ""
-        i = index
-        while True:
-            result = chr(ord("A") + i % 26) + result
-            i = i // 26 - 1
-            if i < 0:
-                break
-        return result
+        return index_to_column_letter(index)
