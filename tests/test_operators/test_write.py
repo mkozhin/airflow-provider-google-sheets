@@ -4526,6 +4526,29 @@ class TestAppendPositional:
         assert hook._counts["update_values"] >= 1
         assert sheet.data_rows() == [["a", 1], ["b", 2]]
 
+    def test_cell_range_sheet_prefix_targets_named_tab(self, mock_hook, context):
+        """Regression: cell_range='Data!B2:C' with sheet_name=None must read and
+        write the 'Data' tab, not the first sheet. The sheet named inside
+        cell_range wins and its prefix must reach every A1 range string."""
+        mock_hook.get_values.return_value = [["a", "b"]]  # one existing row at B2
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            cell_range="Data!B2:C",
+            data=[["x", "y"]],
+            has_headers=False,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        read_ranges = [c[0][1] for c in mock_hook.get_values.call_args_list]
+        write_ranges = [c[0][1] for c in mock_hook.update_values.call_args_list]
+        assert read_ranges, "expected a read for E0"
+        assert write_ranges, "expected a positional write"
+        for rng in read_ranges + write_ranges:
+            assert rng.startswith("Data!"), f"range {rng!r} lost the 'Data' tab"
+
     def test_idempotency_404_mid_batch_no_dupes(self, context):
         """404 after the first data batch → whole write re-runs positionally →
         final grid is exactly right, no duplicated rows."""

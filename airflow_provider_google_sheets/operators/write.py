@@ -713,18 +713,22 @@ class GoogleSheetsWriteOperator(BaseOperator):
         end-row is intentionally ignored — ``E0`` is read to the bottom of the
         window and new rows may land below the ``cell_range`` end row.
         """
-        prefix = self._sheet_prefix()
-
         # Resolve the column window (start col/row + width). With cell_range the
         # window comes from it; otherwise from table_start with the data width.
+        # The A1 prefix for the read/write ranges must follow the RESOLVED sheet:
+        # a sheet named inside cell_range (e.g. "Data!B2:C") wins over sheet_name
+        # and must be honoured, else the ranges target the first tab instead of
+        # the one cell_range points at.
         if self.cell_range:
             window = A1Range.parse(self.cell_range, sheet=self.sheet_name)
             start_col = window.start_col
             start_row = window.start_row
             window_width = window.width() or 0
+            prefix = f"{window.sheet}!" if window.sheet else ""
         else:
             start_col, start_row = self._parse_range_start(self.table_start)
             window_width = 0
+            prefix = self._sheet_prefix()
 
         width = max(window_width, WrittenExtent.row_width(headers, rows))
 

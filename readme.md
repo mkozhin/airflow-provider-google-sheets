@@ -336,7 +336,7 @@ multi_sorted = GoogleSheetsWriteOperator(
 | `gcp_conn_id` | str | `"google_cloud_default"` | Airflow Connection ID |
 | `spreadsheet_id` | str | — | Spreadsheet ID |
 | `sheet_name` | str | `None` | Sheet name |
-| `cell_range` | str | `None` | Target A1 range (overwrite mode) |
+| `cell_range` | str | `None` | Target A1 range. In `overwrite` mode it is the write range. In `append` mode it bounds the append column *window* (its end-row is ignored — column window only; new rows may land below the given end row). A sheet prefix in `cell_range` (e.g. `"Data!B2:C"`) selects the tab |
 | `write_mode` | str | `"overwrite"` | `"overwrite"`, `"append"`, `"merge"` (alias: `"smart_merge"`) |
 | `clear_mode` | str | `"sheet"` | Overwrite clearing strategy: `"sheet"` clears entire sheet and trims extra rows; `"range"` clears only data columns |
 | `data` | Any | `None` | Data: list[list], list[dict], or file path |

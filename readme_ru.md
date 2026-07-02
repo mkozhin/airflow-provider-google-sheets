@@ -338,7 +338,7 @@ multi_sorted = GoogleSheetsWriteOperator(
 | `gcp_conn_id` | str | `"google_cloud_default"` | ID подключения Airflow |
 | `spreadsheet_id` | str | — | ID таблицы |
 | `sheet_name` | str | `None` | Имя листа |
-| `cell_range` | str | `None` | Целевой диапазон A1 (режим перезаписи) |
+| `cell_range` | str | `None` | Целевой диапазон A1. В режиме `overwrite` — диапазон записи. В режиме `append` задаёт *окно колонок* дозаписи (конечная строка игнорируется — учитываются только колонки; новые строки могут оказаться ниже указанной конечной строки). Префикс листа в `cell_range` (например, `"Data!B2:C"`) выбирает вкладку |
 | `write_mode` | str | `"overwrite"` | `"overwrite"`, `"append"`, `"merge"` (псевдоним: `"smart_merge"`) |
 | `clear_mode` | str | `"sheet"` | Стратегия очистки при перезаписи: `"sheet"` очищает весь лист и удаляет лишние строки; `"range"` очищает только столбцы данных |
 | `data` | Any | `None` | Данные: list[list], list[dict] или путь к файлу |
