@@ -16,6 +16,7 @@ from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from airflow_provider_google_sheets.operators.write import GoogleSheetsWriteOperator
+from airflow_provider_google_sheets.utils.write_extent import WrittenExtent
 
 
 SPREADSHEET_ID = "test-spreadsheet-id"
@@ -2652,12 +2653,10 @@ class TestExecuteSort:
         op = self._make_op(["date:desc"])
         op._execute_sort(
             hook,
+            WrittenExtent(start_row=1, header_present=False, total_rows=10, width=3),
             headers=["date", "region", "value"],
             sheet_id=0,
-            table_start_col="A",
-            table_start_row=1,
-            skip_header=False,
-            end_row=10,
+            start_col="A",
         )
         hook.batch_update.assert_called_once()
         requests = hook.batch_update.call_args[0][1]
@@ -2673,12 +2672,10 @@ class TestExecuteSort:
         op = self._make_op(["date:desc", "region:asc"])
         op._execute_sort(
             hook,
+            WrittenExtent(start_row=1, header_present=False, total_rows=5, width=3),
             headers=["date", "region", "value"],
             sheet_id=0,
-            table_start_col="A",
-            table_start_row=1,
-            skip_header=False,
-            end_row=5,
+            start_col="A",
         )
         specs = hook.batch_update.call_args[0][1][0]["sortRange"]["sortSpecs"]
         assert len(specs) == 2
@@ -2692,12 +2689,10 @@ class TestExecuteSort:
         op = self._make_op(["date:desc"])
         op._execute_sort(
             hook,
+            WrittenExtent(start_row=3, header_present=True, total_rows=8, width=1),
             headers=["date"],
             sheet_id=0,
-            table_start_col="A",
-            table_start_row=3,
-            skip_header=True,
-            end_row=10,
+            start_col="A",
         )
         rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
         # table_start_row - 1 + 1 = 3
@@ -2708,12 +2703,10 @@ class TestExecuteSort:
         op = self._make_op(["date:desc"])
         op._execute_sort(
             hook,
+            WrittenExtent(start_row=3, header_present=False, total_rows=8, width=1),
             headers=["date"],
             sheet_id=0,
-            table_start_col="A",
-            table_start_row=3,
-            skip_header=False,
-            end_row=10,
+            start_col="A",
         )
         rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
         # table_start_row - 1 = 2
@@ -2724,12 +2717,10 @@ class TestExecuteSort:
         op = self._make_op(["date:desc"])
         op._execute_sort(
             hook,
+            WrittenExtent(start_row=1, header_present=False, total_rows=42, width=1),
             headers=["date"],
             sheet_id=0,
-            table_start_col="A",
-            table_start_row=1,
-            skip_header=False,
-            end_row=42,
+            start_col="A",
         )
         rng = hook.batch_update.call_args[0][1][0]["sortRange"]["range"]
         assert rng["endRowIndex"] == 42
@@ -2739,12 +2730,10 @@ class TestExecuteSort:
         op = self._make_op(["value:asc"])
         op._execute_sort(
             hook,
+            WrittenExtent(start_row=1, header_present=False, total_rows=10, width=3),
             headers=["date", "region", "value"],
             sheet_id=0,
-            table_start_col="C",
-            table_start_row=1,
-            skip_header=False,
-            end_row=10,
+            start_col="C",
         )
         sort_range = hook.batch_update.call_args[0][1][0]["sortRange"]
         rng = sort_range["range"]
@@ -2759,12 +2748,10 @@ class TestExecuteSort:
         op = self._make_op(["date:ASC", "region:Desc"])
         op._execute_sort(
             hook,
+            WrittenExtent(start_row=1, header_present=False, total_rows=10, width=2),
             headers=["date", "region"],
             sheet_id=0,
-            table_start_col="A",
-            table_start_row=1,
-            skip_header=False,
-            end_row=10,
+            start_col="A",
         )
         specs = hook.batch_update.call_args[0][1][0]["sortRange"]["sortSpecs"]
         assert specs[0]["sortOrder"] == "ASCENDING"
@@ -2773,15 +2760,13 @@ class TestExecuteSort:
     def test_noop_on_empty_range(self):
         hook = MagicMock()
         op = self._make_op(["date:desc"])
-        # header-only: skip_header=True, end_row == table_start_row
+        # header-only: header_present=True, sort_end == table top → no-op
         op._execute_sort(
             hook,
+            WrittenExtent(start_row=1, header_present=True, total_rows=1, width=1),
             headers=["date"],
             sheet_id=0,
-            table_start_col="A",
-            table_start_row=1,
-            skip_header=True,
-            end_row=1,
+            start_col="A",
         )
         hook.batch_update.assert_not_called()
 

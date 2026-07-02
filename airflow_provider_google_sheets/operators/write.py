@@ -30,6 +30,7 @@ from airflow_provider_google_sheets.utils.schema import (
     apply_schema_to_value,
     format_row_for_write,
 )
+from airflow_provider_google_sheets.utils.write_extent import WrittenExtent
 
 logger = logging.getLogger(__name__)
 
@@ -607,23 +608,18 @@ class GoogleSheetsWriteOperator(BaseOperator):
 
         # Server-side sort (clear_mode="range" is already blocked in __init__).
         if self.sort_keys:
-            skip_header = bool(self.write_headers and headers)
             # all_rows already includes the header row when write_headers=True.
-            end_row = (start_row_num - 1) + len(all_rows)
-            # Cover the widest written row: data rows can be wider than headers.
-            num_columns = max(
-                len(headers) if headers else 0,
-                max((len(r) for r in all_rows), default=0),
+            extent = WrittenExtent(
+                start_row=start_row_num,
+                header_present=bool(self.write_headers and headers),
+                total_rows=len(all_rows),
+                width=max(
+                    len(headers) if headers else 0,
+                    max((len(r) for r in all_rows), default=0),
+                ),
             )
             self._execute_sort(
-                hook,
-                headers,
-                self._get_sheet_id(hook),
-                start_col,
-                start_row_num,
-                skip_header,
-                end_row,
-                num_columns,
+                hook, extent, headers, self._get_sheet_id(hook), start_col
             )
 
         logger.info("Overwrite complete: %d rows written", total_written)
@@ -828,36 +824,20 @@ class GoogleSheetsWriteOperator(BaseOperator):
             # with build_existing_key_index (which skips the existing first row
             # whenever has_headers=True, independent of write_headers) and with
             # the operator's has_headers model of existing-sheet header presence.
-            skip_header = header_written_this_run or (
-                existing_row_count > 0 and self.has_headers
-            )
-            end_row = (
-                (start_row - 1)
-                + existing_row_count
+            extent = WrittenExtent(
+                start_row=start_row,
+                header_present=header_written_this_run
+                or (existing_row_count > 0 and self.has_headers),
+                total_rows=existing_row_count
                 + (1 if header_written_this_run else 0)
-                + len(rows)
-            )
-            # Width contract: the sort range spans the table's declared/written
-            # width — max(len(headers), widest row written this run). Cells to
-            # the RIGHT of that width are intentionally NOT reordered. We cannot
-            # widen to swallow pre-existing on-sheet rows that are wider than the
-            # headers, because an open-width read cannot distinguish same-table
-            # ragged cells from FOREIGN adjacent-column data — reordering foreign
-            # data would be a worse corruption. Headers define the table; rows
-            # that belong to the same table must not exceed the written width.
-            num_columns = max(
-                len(headers) if headers else 0,
-                max((len(r) for r in rows), default=0),
+                + len(rows),
+                width=max(
+                    len(headers) if headers else 0,
+                    max((len(r) for r in rows), default=0),
+                ),
             )
             self._execute_sort(
-                hook,
-                headers,
-                self._get_sheet_id(hook),
-                start_col,
-                start_row,
-                skip_header,
-                end_row,
-                num_columns,
+                hook, extent, headers, self._get_sheet_id(hook), start_col
             )
 
         logger.info("Append complete: %d rows written", total_written)
@@ -1050,8 +1030,6 @@ class GoogleSheetsWriteOperator(BaseOperator):
 
         # Server-side sort after all mutations (deletes + appends).
         if self.sort_keys:
-            rows_after_merge = total_existing - total_deleted + len(append_rows)
-            end_row = (table_start_row - 1) + rows_after_merge
             # A physical header row exists only if we just wrote one, or the
             # sheet already had data AND the table declares headers (has_headers).
             # This matches build_existing_key_index, where has_headers governs
@@ -1060,31 +1038,17 @@ class GoogleSheetsWriteOperator(BaseOperator):
             # `has_headers=False` (reachable via list[dict] input, which sets
             # `headers` so sort_keys passes the execute() guard while the sheet
             # itself has no header row) must NOT skip the first data row.
-            skip_header = headers_just_written or (
-                bool(existing_keys_raw) and self.has_headers
+            extent = WrittenExtent(
+                start_row=table_start_row,
+                header_present=headers_just_written
+                or (bool(existing_keys_raw) and self.has_headers),
+                total_rows=total_existing - total_deleted + len(append_rows),
+                width=max(
+                    len(headers) if headers else 0,
+                    max((len(r) for r in append_rows), default=0),
+                ),
             )
-            # Width contract: the sort range spans the table's declared/written
-            # width — max(len(headers), widest row written this run). Cells to
-            # the RIGHT of that width are intentionally NOT reordered. We cannot
-            # widen to swallow pre-existing on-sheet rows that are wider than the
-            # headers, because an open-width read cannot distinguish same-table
-            # ragged cells from FOREIGN adjacent-column data — reordering foreign
-            # data would be a worse corruption. Headers define the table; rows
-            # that belong to the same table must not exceed the written width.
-            num_columns = max(
-                len(headers) if headers else 0,
-                max((len(r) for r in append_rows), default=0),
-            )
-            self._execute_sort(
-                hook,
-                headers,
-                sheet_id,
-                table_start_col,
-                table_start_row,
-                skip_header,
-                end_row,
-                num_columns,
-            )
+            self._execute_sort(hook, extent, headers, sheet_id, table_start_col)
 
         logger.info("Merge complete: %s", stats)
         return {
@@ -1116,52 +1080,26 @@ class GoogleSheetsWriteOperator(BaseOperator):
     def _execute_sort(
         self,
         hook: GoogleSheetsHook,
+        extent: WrittenExtent,
         headers: list[str],
         sheet_id: int,
-        table_start_col: str,
-        table_start_row: int,
-        skip_header: bool,
-        end_row: int,
-        num_columns: int | None = None,
+        start_col: str,
     ) -> None:
         """Server-side sort the written table via a single ``sortRange`` request.
 
         Args:
             hook: Google Sheets hook used to issue the ``batchUpdate`` request.
+            extent: :class:`WrittenExtent` describing the table geometry — top
+                row, header presence, total physical rows and sort width. It
+                supplies the 0-based ``sort_start`` / ``sort_end`` row bounds
+                and ``num_columns`` (see its docstring for the width contract).
             headers: Table headers (post column_mapping), used to resolve sort
                 columns to absolute dimension indices.
             sheet_id: Numeric sheet ID.
-            table_start_col: Left-most column letter of the table (e.g. ``"A"``).
-            table_start_row: 1-based row of the table's top edge.
-            skip_header: When ``True``, the first table row is a header and is
-                excluded from the sort range.
-            end_row: 0-based exclusive end row of the sort range (i.e. the total
-                row count from the top of the sheet). The sort never touches rows
-                outside the table.
-            num_columns: Width (in columns) of the sort range. Data rows can be
-                wider than the header row (e.g. list[list] input), so the sort
-                range must cover the widest written row, not just
-                ``len(headers)`` — otherwise the extra right-hand cells are not
-                reordered and desync from the sorted columns. Defaults to
-                ``len(headers)`` when not provided. Sort keys always live within
-                ``headers`` so ``dimensionIndex < endColumnIndex`` still holds.
-
-                Width contract: the sort range spans the table's declared /
-                written width — ``max(len(headers), widest row written this
-                run)``. In append/merge modes, pre-existing on-sheet rows that
-                are wider than that width are intentionally NOT covered: their
-                right-hand cells are left unsorted. This is deliberate. An
-                open-width read of the sheet cannot distinguish same-table
-                ragged cells from FOREIGN data in adjacent columns, so widening
-                the sort range to reach them would risk reordering unrelated
-                neighbouring data — a worse corruption than leaving a few
-                over-wide same-table cells unsorted. Headers define the table;
-                same-table rows must not exceed the written width.
+            start_col: Left-most column letter of the table (e.g. ``"A"``).
         """
-        start_col_idx = self._column_letter_to_index(table_start_col)
-        end_col_idx = start_col_idx + (
-            num_columns if num_columns is not None else len(headers)
-        )
+        start_col_idx = self._column_letter_to_index(start_col)
+        end_col_idx = start_col_idx + extent.num_columns
         sort_specs: list[dict] = []
         for spec in self.sort_keys:
             col, direction = self._parse_sort_spec(spec)
@@ -1170,17 +1108,16 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 "dimensionIndex": col_idx,
                 "sortOrder": "ASCENDING" if direction == "asc" else "DESCENDING",
             })
-        data_start = (table_start_row - 1) + (1 if skip_header else 0)
         # No-op on an empty range: the Google API rejects a sortRange where
         # startRowIndex >= endRowIndex. Covers empty data / header-only tables.
-        if data_start >= end_row:
+        if extent.sort_start >= extent.sort_end:
             return
         hook.batch_update(self.spreadsheet_id, [{
             "sortRange": {
                 "range": {
                     "sheetId": sheet_id,
-                    "startRowIndex": data_start,
-                    "endRowIndex": end_row,
+                    "startRowIndex": extent.sort_start,
+                    "endRowIndex": extent.sort_end,
                     "startColumnIndex": start_col_idx,
                     "endColumnIndex": end_col_idx,
                 },

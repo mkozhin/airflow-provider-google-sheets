@@ -381,7 +381,7 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py`
 
-- [ ] Создать `utils/write_extent.py` с frozen dataclass `WrittenExtent`:
+- [x] Создать `utils/write_extent.py` с frozen dataclass `WrittenExtent`:
       поля `start_row: int` (1-based верх таблицы), `header_present: bool`
       (физическая строка заголовка на листе после операции — записанная этим
       прогоном ИЛИ уже существовавшая при `has_headers`),
@@ -401,7 +401,7 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       данные») — ОДИН раз в docstring класса (заменяет 3 дублированные
       ~10-строчные версии: комментарии write.py:683–694, 905–916 и docstring
       `_execute_sort` 984–994).
-- [ ] Прямые unit-тесты `tests/test_utils/test_write_extent.py`:
+- [x] Прямые unit-тесты `tests/test_utils/test_write_extent.py`:
       пустой лист + заголовок записан этим прогоном; непустой лист без
       заголовка (`has_headers=False`); **непустой лист с УЖЕ существовавшим
       заголовком, который этим прогоном НЕ записывался** (кейс,
@@ -409,21 +409,21 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       `E0`-конструирование позиционного append (`total_rows =
       max(0, E0-(start_row-1)) + (1 if write_header_flag else 0) + N`);
       пустые данные (`sort_start >= sort_end` → сортировать нечего).
-- [ ] Переписать `_execute_sort` на приём `WrittenExtent` (+hook, headers,
+- [x] Переписать `_execute_sort` на приём `WrittenExtent` (+hook, headers,
       sheet_id, start_col) вместо 6 позиционных величин; no-op-guard
       (`data_start >= end_row`) выразить через `sort_start >= sort_end`.
-- [ ] Сконструировать `WrittenExtent` во всех трёх существующих режимах из уже
+- [x] Сконструировать `WrittenExtent` во всех трёх существующих режимах из уже
       вычисленных ими величин (overwrite: write.py:586–603; merge: 891–926;
       легаси-append: 667–704) — механическая замена тройки
       `skip_header`/`end_row`/`num_columns`, итоговые числа НЕ меняются,
       дублированные width-contract комментарии удаляются.
-- [ ] **Мигрировать `TestExecuteSort` (test_write.py:2592–2736)** — 8 прямых
+- [x] **Мигрировать `TestExecuteSort` (test_write.py:2592–2736)** — 8 прямых
       вызовов `op._execute_sort(...)` с keyword-аргументами старой сигнатуры
       (2603, 2624, 2643, 2659, 2675, 2690, 2710, 2727): каждый переписать на
       конструирование `WrittenExtent` + новую сигнатуру. Интеграционные
       sort-тесты overwrite/merge, проверяющие только испущенный
       `sortRange`-dict, правок не требуют (форма dict не меняется).
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 6
+- [x] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 6
       (поведение не изменилось: те же sortRange-запросы).
 
 ### Task 6: Интеграция sort в позиционный append + миграция sort-тестов
