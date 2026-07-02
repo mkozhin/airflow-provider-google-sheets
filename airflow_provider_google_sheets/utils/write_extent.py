@@ -12,6 +12,7 @@ same off-by-one-prone formulas and the width-contract explanation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -56,6 +57,19 @@ class WrittenExtent:
     header_present: bool
     total_rows: int
     width: int
+
+    @staticmethod
+    def row_width(headers: Sequence | None, rows: Sequence[Sequence]) -> int:
+        """Table write width: ``max(len(headers), widest written row)``.
+
+        Single source of truth for the sort-range width each write mode passes
+        as :attr:`width` — folds the header width and the widest data row into
+        one number so the three modes stay byte-identical.
+        """
+        return max(
+            len(headers) if headers else 0,
+            max((len(r) for r in rows), default=0),
+        )
 
     @property
     def sort_start(self) -> int:

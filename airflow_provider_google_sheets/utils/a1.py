@@ -168,7 +168,7 @@ class A1Range:
 
     def col_at(self, offset: int) -> str:
         """Column letter *offset* columns to the right of :attr:`start_col`."""
-        return index_to_column_letter(column_letter_to_index(self.start_col) + offset)
+        return col_offset(self.start_col, offset)
 
     def _prefix(self) -> str:
         return f"{self.sheet}!" if self.sheet else ""

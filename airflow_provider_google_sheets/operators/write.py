@@ -650,10 +650,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 start_row=start_row_num,
                 header_present=bool(self.write_headers and headers),
                 total_rows=len(all_rows),
-                width=max(
-                    len(headers) if headers else 0,
-                    max((len(r) for r in all_rows), default=0),
-                ),
+                width=WrittenExtent.row_width(headers, all_rows),
             )
             self._execute_sort(
                 hook, extent, headers, self._get_sheet_id(hook), start_col
@@ -729,9 +726,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
             start_col, start_row = self._parse_range_start(self.table_start)
             window_width = 0
 
-        payload_width = max((len(r) for r in rows), default=0)
-        header_width = len(headers) if headers else 0
-        width = max(window_width, header_width, payload_width)
+        width = max(window_width, WrittenExtent.row_width(headers, rows))
 
         # Read E0 — absolute row of the last non-empty row in the window, from
         # the table's top row downward; start_row-1 when the window is empty.
@@ -886,10 +881,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 total_rows=existing_row_count
                 + (1 if header_written_this_run else 0)
                 + len(rows),
-                width=max(
-                    len(headers) if headers else 0,
-                    max((len(r) for r in rows), default=0),
-                ),
+                width=WrittenExtent.row_width(headers, rows),
             )
             self._execute_sort(
                 hook, extent, headers, self._get_sheet_id(hook), start_col
@@ -1098,10 +1090,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 header_present=headers_just_written
                 or (bool(existing_keys_raw) and self.has_headers),
                 total_rows=total_existing - total_deleted + len(append_rows),
-                width=max(
-                    len(headers) if headers else 0,
-                    max((len(r) for r in append_rows), default=0),
-                ),
+                width=WrittenExtent.row_width(headers, append_rows),
             )
             self._execute_sort(hook, extent, headers, sheet_id, table_start_col)
 
