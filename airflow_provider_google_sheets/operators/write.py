@@ -646,11 +646,6 @@ class GoogleSheetsWriteOperator(BaseOperator):
         #                              transient 404 (this is the default).
         if self.append_insert_rows:
             return self._execute_append_insert_rows(hook, headers, rows)
-        # TODO(Task 6): implement the positional sort tail on top of
-        # WrittenExtent. Until then, sort_keys temporarily delegates to the
-        # legacy path so the append is still sorted correctly.
-        if self.sort_keys:
-            return self._execute_append_insert_rows(hook, headers, rows)
         return self._execute_append_positional(hook, headers, rows)
 
     def _execute_append_positional(
@@ -749,6 +744,27 @@ class GoogleSheetsWriteOperator(BaseOperator):
             return total
 
         total_written = self._run_with_transient_404_retry(_write, label="append")
+
+        # Server-side sort — the LAST step, deliberately OUTSIDE the retried
+        # write block so a post-write transient 404 never re-writes over the
+        # already-sorted rows (a sort 404 stays fail-fast, as it always has).
+        # sort_keys + cell_range is blocked in __init__, so the window here is
+        # the plain table (window_width == 0) and `width` matches the legacy
+        # append's sort width. The pre-mutation E0 is translated into the
+        # WrittenExtent formulas from Solution Overview §6.
+        if self.sort_keys:
+            extent = WrittenExtent(
+                start_row=start_row,
+                header_present=write_header_flag
+                or (e0 >= start_row and self.has_headers),
+                total_rows=max(0, e0 - (start_row - 1))
+                + (1 if write_header_flag else 0)
+                + num_rows,
+                width=width,
+            )
+            self._execute_sort(
+                hook, extent, headers, self._get_sheet_id(hook), start_col
+            )
 
         logger.info("Append complete: %d rows written", total_written)
         return {

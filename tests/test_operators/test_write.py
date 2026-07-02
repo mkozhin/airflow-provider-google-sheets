@@ -2970,8 +2970,14 @@ class TestAppendSortKeys:
         # header present → skip it
         assert rng["startRowIndex"] == 1
         assert sort_range["sortSpecs"][0]["sortOrder"] == "DESCENDING"
-        # no header re-written on a non-empty sheet
-        mock_hook.update_values.assert_not_called()
+        # no header re-written on a non-empty sheet (positional path writes the
+        # data rows via update_values, but must NOT write the header row again)
+        header_writes = [
+            c
+            for c in mock_hook.update_values.call_args_list
+            if c[0][2] == [["date", "region"]]
+        ]
+        assert not header_writes
 
     def test_append_sort_width_ignores_wider_existing_rows(self, mock_hook, context):
         """Width contract (Finding B, Option 2): the sort range spans the table's
@@ -3016,7 +3022,13 @@ class TestAppendSortKeys:
         )
         op.execute(context)
 
-        mock_hook.update_values.assert_called_once()
+        # header row written exactly once on the empty sheet
+        header_writes = [
+            c
+            for c in mock_hook.update_values.call_args_list
+            if c[0][2] == [["date", "region"]]
+        ]
+        assert len(header_writes) == 1
         sort_range = _find_sort_range(mock_hook)
         assert sort_range is not None
         rng = sort_range["range"]
@@ -3038,7 +3050,13 @@ class TestAppendSortKeys:
         )
         op.execute(context)
 
-        mock_hook.update_values.assert_not_called()
+        # write_headers=False → no header row written on the empty sheet
+        header_writes = [
+            c
+            for c in mock_hook.update_values.call_args_list
+            if c[0][2] == [["date", "region"]]
+        ]
+        assert not header_writes
         sort_range = _find_sort_range(mock_hook)
         assert sort_range is not None
         rng = sort_range["range"]
@@ -3171,7 +3189,12 @@ class TestAppendSortKeys:
         op.execute(context)
 
         # no header row is ever written when write_headers=False
-        mock_hook.update_values.assert_not_called()
+        header_writes = [
+            c
+            for c in mock_hook.update_values.call_args_list
+            if c[0][2] == [["date", "region"]]
+        ]
+        assert not header_writes
         sort_range = _find_sort_range(mock_hook)
         assert sort_range is not None
         rng = sort_range["range"]
@@ -4630,4 +4653,71 @@ class TestAppendPositional:
         assert sheet.grid[2][1] == "b"
         assert sheet.grid[2][2] == 2
         assert len(sheet.grid[2]) == 3
+
+    def test_positional_append_applies_server_side_sort(self, context):
+        """Task 6: the positional path server-side sorts the written table end to
+        end (the exact sortRange geometry is asserted in TestAppendSortKeys via
+        the mock hook, which now runs through this positional path)."""
+        sheet = FakeSheet(grid=[["date", "n"], ["2024-01-02", "b"]])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[
+                {"date": "2024-01-03", "n": "c"},
+                {"date": "2024-01-01", "n": "a"},
+            ],
+            has_headers=True,
+            sort_keys=["date:asc"],
+            pause_between_batches=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        # Header at row 0 skipped; existing 2 + 2 new = 4 rows sorted ascending
+        # by date, header untouched, no dupes.
+        assert hook._counts["sortRange"] == 1
+        assert sheet.grid == [
+            ["date", "n"],
+            ["2024-01-01", "a"],
+            ["2024-01-02", "b"],
+            ["2024-01-03", "c"],
+        ]
+
+    def test_404_on_write_then_sort_sorts_once_no_rewrite(self, context):
+        """A transient 404 on the positional write is retried, then the sort runs
+        exactly once OUTSIDE the retried write block — a post-write 404 never
+        re-writes over the already-sorted rows. Final grid is correct and sorted
+        once, with no duplicated rows."""
+        sheet = FakeSheet(grid=[["date", "n"], ["2024-01-02", "b"]])
+        hook = FakeSheetsHook(sheet)
+        # batch_size=1 → two data batches; fail AFTER the first is applied so the
+        # whole _write re-runs positionally into the same [E0+1 ..] window.
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[
+                {"date": "2024-01-03", "n": "c"},
+                {"date": "2024-01-01", "n": "a"},
+            ],
+            has_headers=True,
+            sort_keys=["date:asc"],
+            batch_size=1,
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["transient_404_retries"] == 1
+        # Sort issued exactly once (not re-run by the write retry).
+        assert hook._counts["sortRange"] == 1
+        # Final grid sorted once, no duplicates from the retried write.
+        assert sheet.grid == [
+            ["date", "n"],
+            ["2024-01-01", "a"],
+            ["2024-01-02", "b"],
+            ["2024-01-03", "c"],
+        ]
 

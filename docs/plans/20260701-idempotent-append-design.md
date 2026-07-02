@@ -435,16 +435,16 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py`
 
-- [ ] Реализовать sort-хвост в `_execute_append_positional` как последний шаг
+- [x] Реализовать sort-хвост в `_execute_append_positional` как последний шаг
       **вне** retried-блока записи: extent конструируется из `E0` /
       `write_header_flag` / `N` (формулы §6 = конструктор из Task 5); убрать
       временное делегирование в легаси при `sort_keys`.
-- [ ] Мигрировать `TestAppendSortKeys` (~2911–3050) на позиционный путь
+- [x] Мигрировать `TestAppendSortKeys` (~2911–3050) на позиционный путь
       (grid-assert / проверка диапазона sort).
-- [ ] Тест: диапазон sort (start/end row + ширина) под позиционным путём
+- [x] Тест: диапазон sort (start/end row + ширина) под позиционным путём
       соответствует эталонным кейсам; 404 на записи + затем sort не приводит к
       повторной записи поверх отсортированных строк.
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 7.
+- [x] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 7.
 
 ### Task 7: execute()-комментарий + актуализация docstrings + integration-тест
 
