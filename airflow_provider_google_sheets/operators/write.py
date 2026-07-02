@@ -210,6 +210,11 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.transient_404_max_retries = transient_404_max_retries
         self.transient_404_base_delay = transient_404_base_delay
 
+        # Observability counter for transient-404 re-runs. Initialised here (not
+        # only reset in execute()) so direct unit calls to private methods that
+        # go through _run_with_transient_404_retry see a defined attribute.
+        self._transient_404_retries = 0
+
         # Validate transient-404 retry knobs on DAG-load (like other params) so
         # mistakes surface at parse time rather than mid-run. bool is a subclass
         # of int, so True/False must be rejected explicitly — otherwise they'd
@@ -412,6 +417,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 ):
                     raise
                 attempt += 1
+                self._transient_404_retries += 1
                 delay = self.transient_404_base_delay * (2 ** (attempt - 1))
                 logger.warning(
                     "Transient 404 in %s, re-running (attempt %d/%d) in %.1fs",
@@ -427,6 +433,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
     # ------------------------------------------------------------------
 
     def execute(self, context: Any) -> dict[str, Any]:
+        # Reset the transient-404 counter at the start of every run so the
+        # value reflects only this execution (operators can be reused).
+        self._transient_404_retries = 0
+
         hook = GoogleSheetsHook(gcp_conn_id=self.gcp_conn_id, request_timeout=self.request_timeout)
 
         if self.create_sheet_if_missing and self.sheet_name:

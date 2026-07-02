@@ -4027,6 +4027,49 @@ class TestTransient404IdempotencyOverwrite:
         ]
 
 
+class TestTransient404Counter:
+    def test_counter_increments_on_single_404(self, context):
+        """A single injected 404 on an idempotent overwrite → the operator's
+        _transient_404_retries counter equals 1 after the run succeeds."""
+        sheet = FakeSheet(
+            grid=[
+                ["name", "n"],
+                ["stale-1", 91],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"name": "Al", "n": 1}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert op._transient_404_retries == 1
+
+    def test_counter_stays_zero_without_404(self, context):
+        """No 404 anywhere → the counter stays 0 after a successful run."""
+        sheet = FakeSheet(grid=[["name", "n"], ["stale-1", 91]])
+        hook = FakeSheetsHook(sheet)
+
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="overwrite",
+            data=[{"name": "Al", "n": 1}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert op._transient_404_retries == 0
+
+
 class TestTransient404EnsureSheet:
     def test_ensure_sheet_404_on_create_reruns_and_creates(self, context):
         """404 on create_sheet → wrapper re-runs the ensure step → sheet is

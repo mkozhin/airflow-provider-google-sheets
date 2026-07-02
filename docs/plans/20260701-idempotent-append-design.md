@@ -256,17 +256,17 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py`
 
-- [ ] Инициализировать `self._transient_404_retries = 0` в `__init__` (для
+- [x] Инициализировать `self._transient_404_retries = 0` в `__init__` (для
       робастности при прямом юнит-вызове приватных методов) **и** сбрасывать в 0
       в начале `execute()` (до `create_sheet_if_missing`-ветки).
-- [ ] В `_run_with_transient_404_retry` при каждом повторе инкрементировать
+- [x] В `_run_with_transient_404_retry` при каждом повторе инкрементировать
       `self._transient_404_retries` (рядом с существующим WARNING-логом), не меняя
       сигнатуру/семантику re-raise.
-- [ ] Написать тест: одиночный 404 → `self._transient_404_retries == 1` после
+- [x] Написать тест: одиночный 404 → `self._transient_404_retries == 1` после
       успешной операции (через `fail_once` на существующей idempotent-операции,
       напр. overwrite/merge).
-- [ ] Написать тест: без 404 счётчик остаётся 0.
-- [ ] Прогнать тесты — должны пройти перед Task 2.
+- [x] Написать тест: без 404 счётчик остаётся 0.
+- [x] Прогнать тесты — должны пройти перед Task 2.
 
 ### Task 2: Поле `transient_404_retries` в return-dict всех операций + INFO-summary
 
