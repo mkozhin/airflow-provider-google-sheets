@@ -475,19 +475,19 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `readme_ru.md`
 - Modify: `CHANGELOG.md`
 
-- [ ] `readme.md` / `readme_ru.md`: описать новое дефолтное поведение `append`
+- [x] `readme.md` / `readme_ru.md`: описать новое дефолтное поведение `append`
       (позиционная запись, устойчивость к транзиентным 404), параметр
       `append_insert_rows`, допущения «под таблицей в тех же столбцах пусто» и
       **single-writer** (для конкурентной вставки — `append_insert_rows=True`),
       поле `transient_404_retries` в XCom; отметить, что Airflow task-retry не
       покрывается.
-- [ ] `CHANGELOG.md` (Unreleased): **Changed** — `append` теперь пишет позиционно
+- [x] `CHANGELOG.md` (Unreleased): **Changed** — `append` теперь пишет позиционно
       и устойчив к транзиентным 404/ambiguous-success (opt-out
       `append_insert_rows=True` возвращает легаси `INSERT_ROWS`); **Added** —
       `transient_404_retries` в XCom всех режимов (`overwrite`/`append`/`merge` —
       **API addition**) + INFO-summary; примечание про непокрытый task-retry и
       требование single-writer.
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 9.
+- [x] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 9.
 
 ### Task 9: Verify acceptance criteria + перенос плана
 

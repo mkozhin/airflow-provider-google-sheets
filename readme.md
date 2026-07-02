@@ -272,6 +272,8 @@ write = GoogleSheetsWriteOperator(
 )
 
 # Append rows
+# By default append writes positionally (values.update into a fixed range),
+# which makes it resilient to transient 404s without creating duplicates.
 append = GoogleSheetsWriteOperator(
     task_id="append_sheets",
     spreadsheet_id="your-spreadsheet-id",
@@ -353,7 +355,8 @@ multi_sorted = GoogleSheetsWriteOperator(
 | `partition_value` | str | `None` | Value to match against `partition_by` column. Required when `partition_by` is set |
 | `column_mapping` | dict | `None` | Rename headers before writing: `{"source_col": "Sheet Header"}`. Applied after all filtering — `merge_key`, `partition_by`, and `schema` always reference the **original** column names from the input data |
 | `sort_keys` | list[str] | `None` | Sort the table server-side after writing (any write mode). Items are `"column:asc"` / `"column:desc"` (direction case-insensitive), e.g. `["date:desc", "region:asc"]`. Column names refer to headers **after** `column_mapping`. Requires named headers; only the table's own columns are sorted. Format validated at DAG-load time. Not compatible with `overwrite` + `clear_mode="range"` or `append` + `cell_range` |
-| `transient_404_max_retries` | int | `3` | Number of times to re-run the **whole** operation when Google Sheets returns a transient `404` on a spreadsheet that really exists (observed after heavy writes). Only applies to the idempotent modes — `overwrite` and `merge` — and to `create_sheet_if_missing` setup; `append` and read paths stay fail-fast. A non-404 `HttpError` is re-raised immediately. Must be a non-bool `int >= 0`; `0` disables the retry |
+| `append_insert_rows` | bool | `False` | `append` mode only. `False` (default) writes appended rows **positionally** (`values.update` into a fixed range), which makes the write resilient to transient `404` and to ambiguous-success without creating duplicates. `True` restores the legacy `values.append` (`INSERT_ROWS`) behaviour — atomic row insertion, but **not** covered by the transient-404 retry (fail-fast on 404). Use `True` for layouts that keep content directly below the table in the same columns (a footer that `INSERT_ROWS` should push down rather than overwrite), or when several writers append to the same sheet concurrently. See "Append behavior" below. Must be a `bool` |
+| `transient_404_max_retries` | int | `3` | Number of times to re-run the **whole** operation when Google Sheets returns a transient `404` on a spreadsheet that really exists (observed after heavy writes). Applies to the idempotent modes — `overwrite` and `merge` — to the default (positional) `append`, and to `create_sheet_if_missing` setup. Legacy `append` (`append_insert_rows=True`) and read paths stay fail-fast. A non-404 `HttpError` is re-raised immediately. Must be a non-bool `int >= 0`; `0` disables the retry |
 | `transient_404_base_delay` | float | `5.0` | Base delay in seconds for the exponential backoff between transient-404 re-runs (delay = `base_delay * 2 ** (attempt - 1)`). Must be a non-bool real `>= 0`. Worst case with defaults: 1 initial run plus up to 3 re-runs (4 runs total) with `5 + 10 + 20 = 35`s of backoff between them — keep the Airflow `execution_timeout` comfortably above this |
 
 **Data input formats:**
@@ -364,6 +367,27 @@ multi_sorted = GoogleSheetsWriteOperator(
 
 File format is auto-detected by extension: `.csv` → CSV, everything else → JSONL.
 To read a JSON array file, pass `source_type="json"` to `normalize_input_data()` or write data as JSONL instead.
+
+### Append behavior
+
+By default (`append_insert_rows=False`), `append` writes **positionally**: it reads the current height of the table once, then writes the new rows with `values.update` into the fixed range immediately below it. For the ordinary layout (the table is the last block of content in its columns and you append to the bottom) the visible result is identical to the legacy `values.append` (`INSERT_ROWS`) path, so existing DAGs get the new behaviour without any changes.
+
+The positional write is **idempotent on an in-process retry** — a repeated write targets the same cells rather than adding new ones. This is what lets the default `append` participate in the transient-404 retry (see `transient_404_max_retries`) and survive an ambiguous-success inside the hook-level retry without producing duplicate rows.
+
+**Assumptions of the default path:**
+
+- **Nothing below the table in its columns.** The rows immediately under the last non-empty row (in the table's own columns) are assumed to be empty and will be overwritten. If you keep a footer or other content directly below the table in the same columns, set `append_insert_rows=True` so `INSERT_ROWS` pushes it down instead.
+- **Single writer per sheet.** The height is captured once and reused for the write; if another writer appends to the same sheet between the read and the write, the positional path can overwrite those rows (unlike the atomic `INSERT_ROWS`). The provider's contract is exactly one task/DAG writing a given sheet. For concurrent atomic insertion, use `append_insert_rows=True`.
+
+**What is not covered:** the positional append is only resilient while the task is **alive** (an in-process 404 retry). A full Airflow **task-retry** (the task fails and Airflow restarts it) is not covered — a fresh run re-reads the now-grown height and may append again. This is the same behaviour as the legacy append; it is not made worse, only the in-process case is improved.
+
+### Observability
+
+Every write mode returns a result dict via XCom that includes `transient_404_retries` — the number of times the operation re-ran after a transient `404` (`0` when there were none). A `WARNING` is logged on each retry attempt, and when the count is greater than zero an INFO summary (`"<mode> completed after N transient-404 retries"`) is emitted at the end of the task.
+
+```python
+# e.g. {"mode": "append", "rows_written": 3, "transient_404_retries": 0}
+```
 
 ### Merge Algorithm
 
