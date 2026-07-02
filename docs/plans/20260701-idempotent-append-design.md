@@ -211,7 +211,7 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 > задач, чтобы позиционный append (Task 4) писался сразу на правильном понятии:
 > Task 4 нужен парсер end-столбца, которого в write.py нет — при том что он уже
 > трижды написан в других местах (manage.py:349–358 и 365–370 дословно дважды,
-> tests/test_write.py:3511 `_parse_range`).
+> tests/test_write.py:3523 `_parse_range`).
 
 **Files:**
 - Create: `airflow_provider_google_sheets/utils/a1.py`
@@ -237,7 +237,12 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       `_parse_range_start` оставить как тонкие делегаты в `utils/a1`
       (существующие тесты `TestColumnLetterToIndex` / `TestParseRangeStart` /
       `TestColumnLetterConversion` остаются зелёными без правок), а их
-      РЕАЛИЗАЦИЮ перенести в `utils/a1`; inline-рендеры
+      РЕАЛИЗАЦИЮ перенести в `utils/a1`. ⚠️ `_parse_range_start` обязан
+      сохранить свою lenient-семантику дефолтов — `"B:D"` → `("B", 1)`,
+      `"1:100"` → `("A", 1)` (закреплена тестами test_write.py:889, 892) —
+      поэтому в `utils/a1` он живёт отдельной снисходительной функцией
+      (`parse_range_start`), НЕ через строгий `A1Range.parse` (который на
+      мусор кидает ValueError); inline-рендеры
       `f"{prefix}{col}{row}"` в местах, где уже есть распарсенные
       col/row, заменить на `A1Range`/`col_at`/`cell` там, где это не раздувает
       diff (минимум — оба места вычисления `end_col` в overwrite/append:
@@ -328,14 +333,14 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       `append_insert_rows=False` (диспетчер: `True → legacy`, `False → positional`).
       Sort в позиционной ветке пока НЕ реализован — если `self.sort_keys` заданы,
       временно допустимо делегировать в легаси или явно оставить TODO; полноценный
-      sort добавляется в Task 5 (не оставлять несортированным то, что тест ждёт
-      отсортированным — sort-тесты мигрируются в Task 5).
+      sort добавляется в Task 6 (не оставлять несортированным то, что тест ждёт
+      отсортированным — sort-тесты мигрируются в Task 6).
 - [ ] **Аудит всех append-тестов**: прогнать
       `rg 'write_mode="append"' tests/test_operators/test_write.py` и для КАЖДОГО
       кейса явно решить — перевести на `append_insert_rows=True` (проверка
       легаси-механики: `append_values`-asserts, single-cell read,
       `update_values.assert_not_called()`), на grid-assert через `FakeSheet`, или
-      оставить (sort-кейсы — в Task 5). Затронуты минимум: `TestAppend` (145–266),
+      оставить (sort-кейсы — в Task 6). Затронуты минимум: `TestAppend` (145–266),
       `TestTableStart` append (~1199–1283), append-кейсы `TestDataSources`,
       `TestPartitionBy`, `TestColumnMapping`. Мотив: на bare-`MagicMock`
       `get_values` позиционное чтение `E0` кидает `TypeError`.
@@ -363,11 +368,12 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       тронуты); дефолтный append использует `update_values`, а не `append_values`.
 - [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 5.
 
-### Task 5: `WrittenExtent` + интеграция sort в позиционный append + миграция sort-тестов
+### Task 5: `WrittenExtent` — рефактор sort-вызовов без смены поведения
 
-> Включает кандидата №2 архитектурного ревью 2026-07-02 (решение: делать
-> внутри этой задачи, чтобы sort-тесты мигрировались один раз, а формулы §6
-> не становились четвёртой копией). Термин — в CONTEXT.md («Written Extent»).
+> Кандидат №2 архитектурного ревью 2026-07-02, часть (a): чистый
+> behavior-preserving рефактор — value-тип + перевод `_execute_sort` и всех
+> СУЩЕСТВУЮЩИХ режимов на него. Sort позиционного append — отдельно в Task 6.
+> Термин — в CONTEXT.md («Written Extent»).
 
 **Files:**
 - Create: `airflow_provider_google_sheets/utils/write_extent.py`
@@ -378,40 +384,69 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - [ ] Создать `utils/write_extent.py` с frozen dataclass `WrittenExtent`:
       поля `start_row: int` (1-based верх таблицы), `header_present: bool`
       (физическая строка заголовка на листе после операции — записанная этим
-      прогоном ИЛИ уже существовавшая при `has_headers`), `data_rows: int`,
-      `width: int` (max(len(headers), widest written row)); свойства
-      `sort_start` (0-based, header учтён), `sort_end` (0-based exclusive,
-      = прежний `end_row`), `num_columns` (= width). Width-contract
-      («сортируем только записанную ширину; правее — чужие данные») — ОДИН раз
-      в docstring класса (заменяет 3 дублированных ~10-строчных комментария:
-      write.py:683–694, 905–916, 984–994).
-- [ ] Прямые unit-тесты `tests/test_utils/test_write_extent.py`: формулы §6 как
-      свойства значения — пустой лист + заголовок, непустой c/без заголовка,
-      `E0`-конструирование для позиционного append (`data_rows =
-      max(0, E0-(start_row-1)) + N`), пустые данные (`sort_start >= sort_end`
-      → сортировать нечего).
+      прогоном ИЛИ уже существовавшая при `has_headers`),
+      `total_rows: int` (**все физические строки таблицы после операции,
+      ВКЛЮЧАЯ строку заголовка, если она есть** — именно так сегодня считают
+      все три режима: overwrite `len(all_rows)`, append
+      `existing_row_count + (1 if header_written_this_run) + len(rows)`,
+      merge `rows_after_merge`), `width: int` (max(len(headers), widest
+      written row)); свойства: `sort_start = (start_row-1) +
+      (1 if header_present else 0)` (0-based), `sort_end = (start_row-1) +
+      total_rows` (0-based exclusive, = прежний `end_row`),
+      `num_columns` (= width). ⚠️ Семантика `total_rows` фиксирована как
+      «включая заголовок» намеренно: вариант «строки данных без заголовка»
+      даёт off-by-one в `sort_end` для случая «данные уже были, заголовок
+      существовал ДО прогона» (append/merge считают его внутри своих итогов).
+      Width-contract («сортируем только записанную ширину; правее — чужие
+      данные») — ОДИН раз в docstring класса (заменяет 3 дублированные
+      ~10-строчные версии: комментарии write.py:683–694, 905–916 и docstring
+      `_execute_sort` 984–994).
+- [ ] Прямые unit-тесты `tests/test_utils/test_write_extent.py`:
+      пустой лист + заголовок записан этим прогоном; непустой лист без
+      заголовка (`has_headers=False`); **непустой лист с УЖЕ существовавшим
+      заголовком, который этим прогоном НЕ записывался** (кейс,
+      различающий семантики `total_rows` — сторожит off-by-one);
+      `E0`-конструирование позиционного append (`total_rows =
+      max(0, E0-(start_row-1)) + (1 if write_header_flag else 0) + N`);
+      пустые данные (`sort_start >= sort_end` → сортировать нечего).
 - [ ] Переписать `_execute_sort` на приём `WrittenExtent` (+hook, headers,
       sheet_id, start_col) вместо 6 позиционных величин; no-op-guard
       (`data_start >= end_row`) выразить через `sort_start >= sort_end`.
-- [ ] Сконструировать `WrittenExtent` во всех трёх режимах из уже вычисленных
-      ими величин (overwrite: write.py:586–603; merge: 891–926; легаси-append:
-      667–704) — механическая замена тройки `skip_header`/`end_row`/
-      `num_columns`, формулы НЕ меняются, дублированные width-contract
-      комментарии удаляются.
+- [ ] Сконструировать `WrittenExtent` во всех трёх существующих режимах из уже
+      вычисленных ими величин (overwrite: write.py:586–603; merge: 891–926;
+      легаси-append: 667–704) — механическая замена тройки
+      `skip_header`/`end_row`/`num_columns`, итоговые числа НЕ меняются,
+      дублированные width-contract комментарии удаляются.
+- [ ] **Мигрировать `TestExecuteSort` (test_write.py:2592–2736)** — 8 прямых
+      вызовов `op._execute_sort(...)` с keyword-аргументами старой сигнатуры
+      (2603, 2624, 2643, 2659, 2675, 2690, 2710, 2727): каждый переписать на
+      конструирование `WrittenExtent` + новую сигнатуру. Интеграционные
+      sort-тесты overwrite/merge, проверяющие только испущенный
+      `sortRange`-dict, правок не требуют (форма dict не меняется).
+- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 6
+      (поведение не изменилось: те же sortRange-запросы).
+
+### Task 6: Интеграция sort в позиционный append + миграция sort-тестов
+
+> Кандидат №2, часть (b): НОВОЕ поведение — sort-хвост позиционного пути,
+> строится на `WrittenExtent` из Task 5.
+
+**Files:**
+- Modify: `airflow_provider_google_sheets/operators/write.py`
+- Modify: `tests/test_operators/test_write.py`
+
 - [ ] Реализовать sort-хвост в `_execute_append_positional` как последний шаг
       **вне** retried-блока записи: extent конструируется из `E0` /
-      `write_header_flag` / `N` (формулы §6); убрать временное делегирование в
-      легаси при `sort_keys`.
+      `write_header_flag` / `N` (формулы §6 = конструктор из Task 5); убрать
+      временное делегирование в легаси при `sort_keys`.
 - [ ] Мигрировать `TestAppendSortKeys` (~2911–3050) на позиционный путь
       (grid-assert / проверка диапазона sort).
 - [ ] Тест: диапазон sort (start/end row + ширина) под позиционным путём
       соответствует эталонным кейсам; 404 на записи + затем sort не приводит к
       повторной записи поверх отсортированных строк.
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 6
-      (включая незатронутые sort-тесты overwrite/merge — их формулы не
-      изменились, только носитель).
+- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 7.
 
-### Task 6: execute()-комментарий + актуализация docstrings + integration-тест
+### Task 7: execute()-комментарий + актуализация docstrings + integration-тест
 
 **Files:**
 - Modify: `airflow_provider_google_sheets/operators/write.py`
@@ -431,9 +466,9 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - [ ] Тест интеграции через `execute()`: дефолтный append с одним 404 в середине
       записи завершается успешно, финальная сетка корректна, `transient_404_retries`
       в XCom-результате отражает число ретраев.
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 7.
+- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 8.
 
-### Task 7: Обновить документацию
+### Task 8: Обновить документацию
 
 **Files:**
 - Modify: `readme.md`
@@ -452,9 +487,9 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       `transient_404_retries` в XCom всех режимов (`overwrite`/`append`/`merge` —
       **API addition**) + INFO-summary; примечание про непокрытый task-retry и
       требование single-writer.
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 8.
+- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 9.
 
-### Task 8: Verify acceptance criteria + перенос плана
+### Task 9: Verify acceptance criteria + перенос плана
 
 - [ ] Проверить, что закрыты источники №2 и №3, а №1 (task-retry) явно вне scope.
 - [ ] Проверить контракт: `cell_range` разрешён, `sort_keys`+`cell_range` запрет
