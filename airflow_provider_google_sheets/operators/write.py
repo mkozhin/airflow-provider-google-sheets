@@ -719,16 +719,22 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # a sheet named inside cell_range (e.g. "Data!B2:C") wins over sheet_name
         # and must be honoured, else the ranges target the first tab instead of
         # the one cell_range points at.
+        # Effective sheet: a sheet named inside cell_range (e.g. "Data!B2:C")
+        # wins over sheet_name. The A1 prefix AND every grid operation
+        # (ensure_rows, sort sheet-id) must key off this same effective sheet,
+        # else the ranges read/write "Data" while the grid ops grow/sort the
+        # first tab.
         if self.cell_range:
             window = A1Range.parse(self.cell_range, sheet=self.sheet_name)
             start_col = window.start_col
             start_row = window.start_row
             window_width = window.width() or 0
-            prefix = f"{window.sheet}!" if window.sheet else ""
+            effective_sheet = window.sheet or self.sheet_name
         else:
             start_col, start_row = self._parse_range_start(self.table_start)
             window_width = 0
-            prefix = self._sheet_prefix()
+            effective_sheet = self.sheet_name
+        prefix = f"{effective_sheet}!" if effective_sheet else ""
 
         width = max(window_width, WrittenExtent.row_width(headers, rows))
 
@@ -760,9 +766,9 @@ class GoogleSheetsWriteOperator(BaseOperator):
             # Grow the sheet to fit the header (if any) and all data rows.
             if num_rows:
                 required = data_start_abs + num_rows - 1
-                hook.ensure_rows(self.spreadsheet_id, self.sheet_name, required)
+                hook.ensure_rows(self.spreadsheet_id, effective_sheet, required)
             elif write_header_flag:
-                hook.ensure_rows(self.spreadsheet_id, self.sheet_name, start_row)
+                hook.ensure_rows(self.spreadsheet_id, effective_sheet, start_row)
 
             if write_header_flag:
                 header_range = f"{prefix}{start_col}{start_row}"
@@ -801,8 +807,17 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 + num_rows,
                 width=width,
             )
+            # Resolve the sort target from the SAME effective sheet used for the
+            # grid ops above. When cell_range embeds a sheet, self.sheet_name is
+            # None and _get_sheet_id would wrongly fall back to the first tab.
+            if effective_sheet:
+                sort_sheet_id = hook.get_sheet_id(
+                    self.spreadsheet_id, effective_sheet
+                )
+            else:
+                sort_sheet_id = self._get_sheet_id(hook)
             self._execute_sort(
-                hook, extent, headers, self._get_sheet_id(hook), start_col
+                hook, extent, headers, sort_sheet_id, start_col
             )
 
         logger.info("Append complete: %d rows written", total_written)

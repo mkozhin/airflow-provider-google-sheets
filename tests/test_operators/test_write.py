@@ -4549,6 +4549,31 @@ class TestAppendPositional:
         for rng in read_ranges + write_ranges:
             assert rng.startswith("Data!"), f"range {rng!r} lost the 'Data' tab"
 
+    def test_cell_range_sheet_prefix_targets_named_tab_grid_ops(
+        self, mock_hook, context
+    ):
+        """Regression: cell_range='Data!B2:C' with sheet_name=None must grow the
+        'Data' tab, not the first tab. ensure_rows keys off the effective sheet
+        (embedded in cell_range), not self.sheet_name (which is None here)."""
+        mock_hook.get_values.return_value = []  # empty window → needs growth
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            cell_range="Data!B2:C",
+            data=[["x", "y"]],
+            has_headers=False,
+            pause_between_batches=0,
+        )
+        op.execute(context)
+
+        assert mock_hook.ensure_rows.call_count >= 1
+        for call in mock_hook.ensure_rows.call_args_list:
+            # signature: ensure_rows(spreadsheet_id, sheet_name, required)
+            assert call[0][1] == "Data", (
+                f"ensure_rows targeted {call[0][1]!r}, not the 'Data' tab"
+            )
+
     def test_idempotency_404_mid_batch_no_dupes(self, context):
         """404 after the first data batch → whole write re-runs positionally →
         final grid is exactly right, no duplicated rows."""
