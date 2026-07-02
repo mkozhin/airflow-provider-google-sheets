@@ -120,6 +120,12 @@ sheets_write_overwrite()
     tags=["google-sheets", "example"],
 )
 def sheets_write_append():
+    # By default append writes positionally (values.update into the fixed range
+    # below the table), so it is idempotent on an in-process retry and resilient
+    # to transient 404 without creating duplicate rows. This assumes nothing is
+    # below the table in its columns and a single writer per sheet. Set
+    # append_insert_rows=True to restore the legacy values.append (INSERT_ROWS)
+    # behaviour — needed for a footer under the table or concurrent writers.
     GoogleSheetsWriteOperator(
         task_id="append_new_rows",
         gcp_conn_id=GCP_CONN_ID,
