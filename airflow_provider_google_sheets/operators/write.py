@@ -174,6 +174,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         request_timeout: int | None = 300,
         normalize_merge_key_format: bool = True,
         sort_keys: list[str] | None = None,
+        append_insert_rows: bool = False,
         transient_404_max_retries: int = 3,
         transient_404_base_delay: float = 5.0,
         **kwargs: Any,
@@ -207,6 +208,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         self.request_timeout = request_timeout
         self.normalize_merge_key_format = normalize_merge_key_format
         self.sort_keys = sort_keys
+        self.append_insert_rows = append_insert_rows
         self.transient_404_max_retries = transient_404_max_retries
         self.transient_404_base_delay = transient_404_base_delay
 
@@ -214,6 +216,14 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # only reset in execute()) so direct unit calls to private methods that
         # go through _run_with_transient_404_retry see a defined attribute.
         self._transient_404_retries = 0
+
+        # Validate append_insert_rows on DAG-load. Must be a real bool (not an
+        # int-like value) so the opt-out is unambiguous.
+        if not isinstance(append_insert_rows, bool):
+            raise TypeError(
+                "append_insert_rows must be a bool, got "
+                f"{type(append_insert_rows).__name__}"
+            )
 
         # Validate transient-404 retry knobs on DAG-load (like other params) so
         # mistakes surface at parse time rather than mid-run. bool is a subclass
@@ -633,6 +643,23 @@ class GoogleSheetsWriteOperator(BaseOperator):
         headers: list[str] | None,
         rows: list[list[Any]],
     ) -> dict[str, Any]:
+        # Dispatch between the legacy INSERT_ROWS path and the positional path.
+        # TODO(Task 4): route append_insert_rows=False to the positional
+        # (values.update) branch. For now every call goes through the legacy
+        # path so behaviour is identical to before this refactor.
+        return self._execute_append_insert_rows(hook, headers, rows)
+
+    def _execute_append_insert_rows(
+        self,
+        hook: GoogleSheetsHook,
+        headers: list[str] | None,
+        rows: list[list[Any]],
+    ) -> dict[str, Any]:
+        """Legacy ``append`` path using ``hook.append_values`` (``INSERT_ROWS``).
+
+        Selected by ``append_insert_rows=True``. Not idempotent (a re-run
+        double-writes), so it stays fail-fast on transient 404s.
+        """
         prefix = self._sheet_prefix()
         start_col, start_row = self._parse_range_start(self.table_start)
         target = self.cell_range or f"{prefix}{start_col}{start_row}"

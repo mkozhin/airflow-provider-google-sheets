@@ -295,18 +295,18 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py`
 
-- [ ] Добавить параметр `append_insert_rows: bool = False` в `__init__`
+- [x] Добавить параметр `append_insert_rows: bool = False` в `__init__`
       (после `sort_keys`), сохранить в `self.append_insert_rows`. Валидация:
       `if not isinstance(append_insert_rows, bool): raise TypeError(...)`.
-- [ ] Выделить текущее тело `_execute_append` в `_execute_append_insert_rows(...)`
+- [x] Выделить текущее тело `_execute_append` в `_execute_append_insert_rows(...)`
       (легаси `INSERT_ROWS`-путь без изменений, включая его sort-ветку).
-- [ ] `_execute_append` временно делегирует **всегда** в
+- [x] `_execute_append` временно делегирует **всегда** в
       `_execute_append_insert_rows(...)` (TODO: позиционная ветка в Task 4) — так
       дефолтное поведение на этом шаге идентично сегодняшнему.
-- [ ] Тест: `append_insert_rows` с не-bool → `TypeError` на DAG-load.
-- [ ] Тест: `append_insert_rows=True` идёт легаси-путём (вызывается
+- [x] Тест: `append_insert_rows` с не-bool → `TypeError` на DAG-load.
+- [x] Тест: `append_insert_rows=True` идёт легаси-путём (вызывается
       `append_values`).
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное (существующие
+- [x] Прогнать `python -m pytest tests/ -q` — всё зелёное (существующие
       append-тесты без правок); перед Task 4.
 
 ### Task 4: Позиционная запись по умолчанию (без sort) + миграция non-sort тестов

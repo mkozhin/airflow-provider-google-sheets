@@ -264,6 +264,34 @@ class TestAppend:
             f"Expected single-cell check 'C3', got: {check_range!r}"
         )
 
+    def test_append_insert_rows_non_bool_raises_typeerror(self):
+        """append_insert_rows must be a real bool — validated at DAG-load."""
+        with pytest.raises(TypeError, match="append_insert_rows must be a bool"):
+            GoogleSheetsWriteOperator(
+                task_id="test",
+                spreadsheet_id=SPREADSHEET_ID,
+                write_mode="append",
+                data=[{"a": 1}],
+                append_insert_rows="yes",
+            )
+
+    def test_append_insert_rows_true_uses_legacy_append_values(self, mock_hook, context):
+        """append_insert_rows=True routes through the legacy INSERT_ROWS path."""
+        op = GoogleSheetsWriteOperator(
+            task_id="test",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1}, {"a": 2}],
+            append_insert_rows=True,
+        )
+        result = op.execute(context)
+
+        mock_hook.append_values.assert_called_once()
+        appended = mock_hook.append_values.call_args[0][2]
+        assert appended == [[1], [2]]
+        assert result["mode"] == "append"
+        assert result["rows_written"] == 2
+
 
 class TestDataSources:
     def test_data_from_xcom(self, mock_hook, context):
