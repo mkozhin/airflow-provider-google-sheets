@@ -150,6 +150,7 @@ class TestAppend:
             spreadsheet_id=SPREADSHEET_ID,
             write_mode="append",
             data=[{"a": 1}, {"a": 2}],
+            append_insert_rows=True,
         )
         result = op.execute(context)
 
@@ -169,6 +170,7 @@ class TestAppend:
             has_headers=False,
             batch_size=2,
             pause_between_batches=0,
+            append_insert_rows=True,
         )
         result = op.execute(context)
 
@@ -183,6 +185,7 @@ class TestAppend:
             write_mode="append",
             data=[["x"]],
             has_headers=False,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -198,6 +201,7 @@ class TestAppend:
             write_mode="append",
             data=[{"a": 1, "b": 2}],
             write_headers=True,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -216,6 +220,7 @@ class TestAppend:
             write_mode="append",
             data=[{"a": 1, "b": 2}],
             write_headers=True,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -231,6 +236,7 @@ class TestAppend:
             write_mode="append",
             data=[{"a": 1}],
             write_headers=False,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -238,7 +244,13 @@ class TestAppend:
         mock_hook.append_values.assert_called_once()
 
     def test_append_empty_start_cell_with_data_to_the_right(self, mock_hook, context):
-        """table_start='C3' is empty but D3 has data → header still written to C3."""
+        """table_start='C3' is empty but D3 has data → header still written to C3.
+
+        This is the header-divergence layout: the legacy path checks a single
+        cell (C3) and writes headers, while the positional default checks the
+        whole window and would NOT (E0 >= start_row). It is pinned to the legacy
+        opt-out on purpose.
+        """
         # get_values returns non-empty only if we read the whole row;
         # with the fix (single cell check) it returns [] → header is written
         mock_hook.get_values.return_value = []  # C3 cell is empty
@@ -250,6 +262,7 @@ class TestAppend:
             table_start="C3",
             write_headers=True,
             pause_between_batches=0,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -303,6 +316,7 @@ class TestDataSources:
             write_mode="append",
             data_xcom_task_id="upstream_task",
             data_xcom_key="result",
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -321,6 +335,7 @@ class TestDataSources:
             spreadsheet_id=SPREADSHEET_ID,
             write_mode="append",
             data=path,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -338,6 +353,7 @@ class TestDataSources:
             spreadsheet_id=SPREADSHEET_ID,
             write_mode="append",
             data=path,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -350,6 +366,7 @@ class TestDataSources:
             spreadsheet_id=SPREADSHEET_ID,
             write_mode="append",
             data=[{"col1": "a", "col2": "b"}],
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -1247,6 +1264,7 @@ class TestTableStart:
             table_start="C3",
             write_headers=True,
             pause_between_batches=0,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -1271,6 +1289,7 @@ class TestTableStart:
             table_start="B5",
             write_headers=True,
             pause_between_batches=0,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -1290,6 +1309,7 @@ class TestTableStart:
             table_start="C3",
             write_headers=True,
             pause_between_batches=0,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -1305,6 +1325,7 @@ class TestTableStart:
             data=[{"a": 1}],
             write_headers=True,
             pause_between_batches=0,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -3062,7 +3083,8 @@ class TestAppendSortKeys:
         assert read_range.endswith("A1:B")
 
     def test_append_no_sort_keys_no_sort_range(self, mock_hook, context):
-        """sort_keys=None → no sortRange, single-cell emptiness check kept."""
+        """sort_keys=None (legacy opt-out) → no sortRange, single-cell
+        emptiness check kept."""
         mock_hook.get_values.return_value = []
         op = GoogleSheetsWriteOperator(
             task_id="test",
@@ -3070,6 +3092,7 @@ class TestAppendSortKeys:
             write_mode="append",
             data=[{"date": "2024-01-01", "region": "a"}],
             write_headers=True,
+            append_insert_rows=True,
         )
         op.execute(context)
 
@@ -4378,8 +4401,9 @@ class TestTransient404FailFast:
         assert ei.value.resp.status == 404
         assert sleep.call_args_list == [call(5.0), call(10.0)]
 
-    def test_append_404_fails_fast_no_retry(self, mock_hook, context):
-        """append is NOT wrapped: a 404 raises immediately even with retries set."""
+    def test_append_insert_rows_404_fails_fast_no_retry(self, mock_hook, context):
+        """The legacy opt-out is NOT wrapped: a 404 raises immediately even with
+        retries set."""
         mock_hook.get_values.return_value = [["a"]]  # non-empty -> no header write
         mock_hook.append_values.side_effect = _http_error(404)
         op = GoogleSheetsWriteOperator(
@@ -4391,6 +4415,7 @@ class TestTransient404FailFast:
             pause_between_batches=0,
             transient_404_max_retries=3,
             transient_404_base_delay=0,
+            append_insert_rows=True,
         )
         with patch(_SLEEP_PATH) as sleep:
             with pytest.raises(HttpError) as ei:
@@ -4398,3 +4423,226 @@ class TestTransient404FailFast:
         assert ei.value.resp.status == 404
         sleep.assert_not_called()
         assert mock_hook.append_values.call_count == 1  # no operation-level retry
+
+    def test_default_append_retries_404_on_positional_write(self, context):
+        """The default (positional) append RETRIES a transient 404 on the write
+        and completes with the correct final grid."""
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = FakeSheetsHook(sheet)
+        # 404 after the first (and only) data-batch update_values → the whole
+        # _write re-runs positionally and completes.
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"name": "b", "n": 2}],
+            pause_between_batches=0,
+            transient_404_max_retries=3,
+            transient_404_base_delay=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["transient_404_retries"] == 1
+        assert sheet.data_rows() == [["a", 1], ["b", 2]]
+
+
+# ==================================================================
+# Task 4 — Positional (default) append: idempotency & window behaviour
+# ==================================================================
+
+
+class _ForeignWriterHook(FakeSheetsHook):
+    """Fake hook that simulates a *second* writer appending a row into the
+    same columns right after the operator reads E0 (between the read and the
+    positional write)."""
+
+    def __init__(self, sheet, foreign_row):
+        super().__init__(sheet)
+        self._foreign_row = foreign_row
+        self._injected = False
+
+    def get_values(self, spreadsheet_id, rng, date_time_render_option="FORMATTED_STRING"):
+        result = super().get_values(spreadsheet_id, rng, date_time_render_option)
+        if not self._injected:
+            # A concurrent foreign writer appends after we snapshot E0.
+            self._injected = True
+            self.sheet.append_values("A1", [self._foreign_row])
+        return result
+
+
+class TestAppendPositional:
+    """Default (positional values.update) append path — Task 4."""
+
+    def test_default_append_uses_update_not_append_values(self, context):
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"name": "b", "n": 2}],
+            pause_between_batches=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert hook._counts["append_values"] == 0
+        assert hook._counts["update_values"] >= 1
+        assert sheet.data_rows() == [["a", 1], ["b", 2]]
+
+    def test_idempotency_404_mid_batch_no_dupes(self, context):
+        """404 after the first data batch → whole write re-runs positionally →
+        final grid is exactly right, no duplicated rows."""
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = FakeSheetsHook(sheet)
+        # batch_size=1 → two data batches; fail AFTER the first is applied.
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"name": "b", "n": 2}, {"name": "c", "n": 3}],
+            batch_size=1,
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["rows_written"] == 2
+        assert sheet.data_rows() == [["a", 1], ["b", 2], ["c", 3]]
+
+    def test_positional_double_apply_of_write_no_dupes(self, context):
+        """Applying the same positional write twice to the same E0 (models both
+        the operation-level 404 retry and a hook-level 429/500/503 retry that
+        replays the same update_values into the same range) leaves no dupes."""
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = FakeSheetsHook(sheet)
+        # Single batch (batch_size default) → fail AFTER the whole batch applies,
+        # so the ENTIRE _write is applied and then re-applied to the same E0.
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"name": "b", "n": 2}, {"name": "c", "n": 3}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["rows_written"] == 2
+        assert sheet.data_rows() == [["a", 1], ["b", 2], ["c", 3]]
+
+    def test_e0_fixed_on_retry_height_does_not_drift(self, context):
+        """A non-empty sheet + 404 on the write → the retry writes into the same
+        [E0+1 ..] window; the table height does not creep upward."""
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1], ["b", 2]])
+        hook = FakeSheetsHook(sheet)
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"name": "c", "n": 3}],
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        # Exactly 4 physical rows: header + a + b + c (no stray extra row).
+        assert sheet.grid == [["name", "n"], ["a", 1], ["b", 2], ["c", 3]]
+
+    def test_single_writer_foreign_row_is_overwritten(self, context):
+        """Documents the single-writer assumption: a foreign row appended between
+        the E0 read and the positional write is OVERWRITTEN (unlike atomic
+        INSERT_ROWS). Concurrent inserts should use append_insert_rows=True."""
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = _ForeignWriterHook(sheet, foreign_row=["foreign", 99])
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"name": "b", "n": 2}],
+            pause_between_batches=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        # Our row landed on E0+1, on top of the foreign row → foreign is gone.
+        assert sheet.data_rows() == [["a", 1], ["b", 2]]
+        assert not any("foreign" in row for row in sheet.grid)
+
+    def test_empty_sheet_writes_headers(self, context):
+        sheet = FakeSheet(grid=[])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1, "b": 2}],
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        assert sheet.grid == [["a", "b"], [1, 2]]
+
+    def test_empty_sheet_write_headers_false(self, context):
+        sheet = FakeSheet(grid=[])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1, "b": 2}],
+            write_headers=False,
+            pause_between_batches=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        # No header row written; data starts at row 1.
+        assert sheet.grid == [[1, 2]]
+
+    def test_empty_payload_is_noop_no_valueerror(self, context):
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[],
+            pause_between_batches=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["rows_written"] == 0
+        assert sheet.grid == [["name", "n"], ["a", 1]]
+
+    def test_cell_range_window_leaves_neighbours_untouched(self, context):
+        """cell_range narrows the write to columns B:C; the left (A) and right
+        (D) neighbour columns are not touched."""
+        sheet = FakeSheet(
+            grid=[
+                ["L", "name", "n", "R"],
+                ["l1", "a", 1, "r1"],
+            ]
+        )
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            cell_range="B1:C1",
+            data=[{"name": "b", "n": 2}],
+            pause_between_batches=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        # Existing rows and neighbour columns unchanged.
+        assert sheet.grid[0] == ["L", "name", "n", "R"]
+        assert sheet.grid[1] == ["l1", "a", 1, "r1"]
+        # New row written only into B:C; column A stays empty, D is not created.
+        assert sheet.grid[2][0] == ""
+        assert sheet.grid[2][1] == "b"
+        assert sheet.grid[2][2] == 2
+        assert len(sheet.grid[2]) == 3
+

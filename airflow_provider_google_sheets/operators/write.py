@@ -644,10 +644,122 @@ class GoogleSheetsWriteOperator(BaseOperator):
         rows: list[list[Any]],
     ) -> dict[str, Any]:
         # Dispatch between the legacy INSERT_ROWS path and the positional path.
-        # TODO(Task 4): route append_insert_rows=False to the positional
-        # (values.update) branch. For now every call goes through the legacy
-        # path so behaviour is identical to before this refactor.
-        return self._execute_append_insert_rows(hook, headers, rows)
+        #   append_insert_rows=True  → legacy hook.append_values (INSERT_ROWS),
+        #                              fail-fast on transient 404.
+        #   append_insert_rows=False → positional values.update, resilient to
+        #                              transient 404 (this is the default).
+        if self.append_insert_rows:
+            return self._execute_append_insert_rows(hook, headers, rows)
+        # TODO(Task 6): implement the positional sort tail on top of
+        # WrittenExtent. Until then, sort_keys temporarily delegates to the
+        # legacy path so the append is still sorted correctly.
+        if self.sort_keys:
+            return self._execute_append_insert_rows(hook, headers, rows)
+        return self._execute_append_positional(hook, headers, rows)
+
+    def _execute_append_positional(
+        self,
+        hook: GoogleSheetsHook,
+        headers: list[str] | None,
+        rows: list[list[Any]],
+    ) -> dict[str, Any]:
+        """Default ``append`` path using positional ``values.update``.
+
+        Instead of ``INSERT_ROWS`` (which double-writes on any re-run), this
+        reads the table height ``E0`` *once* before the write and writes the
+        new rows positionally into ``[E0+1 .. E0+N]``. Re-running the write
+        (operation-level transient-404 retry, or a hook-level ``429/500/503``
+        retry) overwrites the same fixed cells, so the append is idempotent on
+        an in-process re-run — closing the transient-404 and ambiguous-success
+        duplicate sources.
+
+        ``E0`` is held in a local variable (no durable store): this fixes the
+        case where the task is still alive and the operator retries a 404
+        internally. A full task restart is out of scope — a fresh run reads the
+        already-grown height and can duplicate, exactly like today's append.
+
+        Assumes a single writer per sheet: ``E0`` is fixed between the read and
+        the write, so a concurrent foreign append into the same columns would be
+        overwritten. Use ``append_insert_rows=True`` for concurrent atomic
+        inserts. Also assumes the table is the last block in its columns (any
+        content below the last non-empty row is overwritten).
+        """
+        prefix = self._sheet_prefix()
+
+        # Resolve the column window (start col/row + width). With cell_range the
+        # window comes from it; otherwise from table_start with the data width.
+        if self.cell_range:
+            window = A1Range.parse(self.cell_range, sheet=self.sheet_name)
+            start_col = window.start_col
+            start_row = window.start_row
+            window_width = window.width() or 0
+        else:
+            start_col, start_row = self._parse_range_start(self.table_start)
+            window_width = 0
+
+        payload_width = max((len(r) for r in rows), default=0)
+        header_width = len(headers) if headers else 0
+        width = max(window_width, header_width, payload_width)
+
+        # Read E0 — absolute row of the last non-empty row in the window, from
+        # the table's top row downward; start_row-1 when the window is empty.
+        # The read is idempotent, so it is safe to wrap in the 404-retry.
+        read_col = A1Range.parse(f"{start_col}{start_row}")
+        end_col = read_col.col_at(max(width, 1) - 1)
+        read_range = f"{prefix}{start_col}{start_row}:{end_col}"
+
+        def _read_e0() -> int:
+            block = hook.get_values(self.spreadsheet_id, read_range)
+            last = start_row - 1
+            for i, r in enumerate(block):
+                if any(str(c).strip() for c in r):
+                    last = start_row + i
+            return last
+
+        e0 = self._run_with_transient_404_retry(_read_e0, label="append")
+
+        # Header decision from the PRE-mutation E0: the sheet is empty (in the
+        # window) when E0 < start_row.
+        write_header_flag = bool(
+            e0 < start_row and self.write_headers and headers
+        )
+        data_start_abs = start_row + 1 if write_header_flag else e0 + 1
+        num_rows = len(rows)
+
+        def _write() -> int:
+            # Grow the sheet to fit the header (if any) and all data rows.
+            if num_rows:
+                required = data_start_abs + num_rows - 1
+                hook.ensure_rows(self.spreadsheet_id, self.sheet_name, required)
+            elif write_header_flag:
+                hook.ensure_rows(self.spreadsheet_id, self.sheet_name, start_row)
+
+            if write_header_flag:
+                header_range = f"{prefix}{start_col}{start_row}"
+                logger.info("Sheet is empty — writing headers to %s", header_range)
+                hook.update_values(self.spreadsheet_id, header_range, [headers])
+
+            total = 0
+            for i in range(0, num_rows, self.batch_size):
+                batch = rows[i : i + self.batch_size]
+                batch_range = f"{prefix}{start_col}{data_start_abs + i}"
+                logger.info(
+                    "Writing batch of %d rows to %s", len(batch), batch_range
+                )
+                hook.update_values(self.spreadsheet_id, batch_range, batch)
+                total += len(batch)
+                if i + self.batch_size < num_rows:
+                    time.sleep(self.pause_between_batches)
+            return total
+
+        total_written = self._run_with_transient_404_retry(_write, label="append")
+
+        logger.info("Append complete: %d rows written", total_written)
+        return {
+            "mode": "append",
+            "rows_written": total_written,
+            "transient_404_retries": self._transient_404_retries,
+        }
 
     def _execute_append_insert_rows(
         self,

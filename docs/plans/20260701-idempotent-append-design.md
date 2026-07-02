@@ -315,7 +315,7 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py`
 
-- [ ] Реализовать `_execute_append_positional(...)` **без sort**: оконный диапазон
+- [x] Реализовать `_execute_append_positional(...)` **без sort**: оконный диапазон
       столбцов (`cell_range` → start/end col + верхняя строка, ширина
       `max(окно, max ширина payload)` с защитой от пустоты; иначе `table_start` +
       ширина данных). Парсинг окна — через `A1Range.parse(...)` из Task 0
@@ -329,13 +329,13 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       label="append")`; **обработка пустого payload** (`rows == []` → no-op,
       `rows_written=0`, заголовки при пустом листе всё равно пишутся); return-dict
       с `rows_written` и `transient_404_retries`.
-- [ ] Переключить `_execute_append` на позиционную ветку при
+- [x] Переключить `_execute_append` на позиционную ветку при
       `append_insert_rows=False` (диспетчер: `True → legacy`, `False → positional`).
       Sort в позиционной ветке пока НЕ реализован — если `self.sort_keys` заданы,
       временно допустимо делегировать в легаси или явно оставить TODO; полноценный
       sort добавляется в Task 6 (не оставлять несортированным то, что тест ждёт
       отсортированным — sort-тесты мигрируются в Task 6).
-- [ ] **Аудит всех append-тестов**: прогнать
+- [x] **Аудит всех append-тестов**: прогнать
       `rg 'write_mode="append"' tests/test_operators/test_write.py` и для КАЖДОГО
       кейса явно решить — перевести на `append_insert_rows=True` (проверка
       легаси-механики: `append_values`-asserts, single-cell read,
@@ -344,29 +344,29 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
       `TestTableStart` append (~1199–1283), append-кейсы `TestDataSources`,
       `TestPartitionBy`, `TestColumnMapping`. Мотив: на bare-`MagicMock`
       `get_values` позиционное чтение `E0` кидает `TypeError`.
-- [ ] **`TestTransient404FailFast.test_append_404_fails_fast_no_retry` (4205)**:
+- [x] **`TestTransient404FailFast.test_append_404_fails_fast_no_retry` (4205)**:
       перевести на `append_insert_rows=True` (fail-fast там сохраняется) + НОВЫЙ
       тест: дефолтный путь **ретраит** 404 на позиционной записи.
-- [ ] Тест (идемпотентность №2): 404 `when="after"` на первом `update_values`
+- [x] Тест (идемпотентность №2): 404 `when="after"` на первом `update_values`
       **дата-батче** → `fake.sheet.grid` содержит РОВНО ожидаемые строки, без
       дублей. ⚠️ Внутри `_write` заголовок в пустой лист тоже пишется через
       `update_values` ДО дата-батчей — либо использовать непустой лист (без
       header-write), либо учесть это в `occurrence` для `fail_once`.
-- [ ] Тест (№3, позиционная идемпотентность): **двойное применение** `_write` к
+- [x] Тест (№3, позиционная идемпотентность): **двойное применение** `_write` к
       тому же `E0` → grid без дублей (моделирует и operation-level 404-ретрай, и
       hook-level `429/500/503` retry — оба повторяют тот же `update_values` в тот
       же range).
-- [ ] Тест (E0 фиксирован): непустой лист + 404 на записи → ретрай пишет в тот же
+- [x] Тест (E0 фиксирован): непустой лист + 404 на записи → ретрай пишет в тот же
       `[E0+1..]`, высота не «уползает».
-- [ ] Тест (single-writer, документирующий): если между чтением `E0` и записью в
+- [x] Тест (single-writer, документирующий): если между чтением `E0` и записью в
       лист «чужим» writer'ом добавлена строка (FakeSheetsHook, мутирующий grid
       между read и write) — позиционная запись её перезаписывает; тест фиксирует
       требование single-writer и рекомендацию `append_insert_rows=True` для
       конкурентной вставки.
-- [ ] Тест: пустой лист + `write_headers=True/False`; пустой payload (`data=[]`) →
+- [x] Тест: пустой лист + `write_headers=True/False`; пустой payload (`data=[]`) →
       no-op без `ValueError`; `cell_range` окно (соседние столбцы слева и справа не
       тронуты); дефолтный append использует `update_values`, а не `append_values`.
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 5.
+- [x] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 5.
 
 ### Task 5: `WrittenExtent` — рефактор sort-вызовов без смены поведения
 
