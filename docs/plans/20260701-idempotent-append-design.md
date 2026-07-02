@@ -491,14 +491,15 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 
 ### Task 9: Verify acceptance criteria + перенос плана
 
-- [ ] Проверить, что закрыты источники №2 и №3, а №1 (task-retry) явно вне scope.
-- [ ] Проверить контракт: `cell_range` разрешён, `sort_keys`+`cell_range` запрет
+- [x] Проверить, что закрыты источники №2 и №3, а №1 (task-retry) явно вне scope.
+- [x] Проверить контракт: `cell_range` разрешён, `sort_keys`+`cell_range` запрет
       сохранён, `append_insert_rows=True` = легаси `1:1` (включая fail-fast на 404),
       допущение single-writer задокументировано.
-- [ ] Проверить наблюдаемость: `transient_404_retries` в return-dict всех режимов;
+- [x] Проверить наблюдаемость: `transient_404_retries` в return-dict всех режимов;
       INFO-summary при K>0; WARNING на каждую попытку.
-- [ ] Прогнать весь набор: `python -m pytest tests/ -q` — всё зелёное.
-- [ ] Переместить этот план в `docs/plans/completed/`.
+- [x] Прогнать весь набор: `python -m pytest tests/ -q` — всё зелёное (640 passed).
+- [x] Переместить этот план в `docs/plans/completed/` (перенос выполняет
+      финализация оркестратора).
 
 ## Post-Completion
 
