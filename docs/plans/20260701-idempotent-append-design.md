@@ -452,21 +452,21 @@ ambiguous-success внутри hook-retry на `429/500/503`) **без риск�
 - Modify: `airflow_provider_google_sheets/operators/write.py`
 - Modify: `tests/test_operators/test_write.py`
 
-- [ ] Убедиться, что в `execute()` `append` вызывается напрямую
+- [x] Убедиться, что в `execute()` `append` вызывается напрямую
       (`self._execute_append(...)`), БЕЗ внешнего `_run_with_transient_404_retry`
       (гранулярность retry — внутри `_execute_append`); обновить комментарий у
       append-ветки (убрать «append is NOT idempotent — fail-fast», описать новый
       контракт и opt-out).
-- [ ] Актуализировать docstrings, ставшие неверными:
+- [x] Актуализировать docstrings, ставшие неверными:
       `_run_with_transient_404_retry` (write.py:390–391, «append is never
       wrapped»); `transient_404_max_retries` (write.py:107–114, «append is
       intentionally excluded … fail-fast»); class-docstring bullet про `append`
       (write.py:39). Плюс docstring нового `append_insert_rows` (назначение,
       допущения single-writer / «под таблицей пусто» / расхождение по заголовкам).
-- [ ] Тест интеграции через `execute()`: дефолтный append с одним 404 в середине
+- [x] Тест интеграции через `execute()`: дефолтный append с одним 404 в середине
       записи завершается успешно, финальная сетка корректна, `transient_404_retries`
       в XCom-результате отражает число ретраев.
-- [ ] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 8.
+- [x] Прогнать `python -m pytest tests/ -q` — всё зелёное перед Task 8.
 
 ### Task 8: Обновить документацию
 

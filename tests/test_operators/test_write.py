@@ -4721,3 +4721,54 @@ class TestAppendPositional:
             ["2024-01-03", "c"],
         ]
 
+
+# ==================================================================
+# Task 7 — end-to-end execute() integration for the default append
+# ==================================================================
+
+
+class TestAppendPositionalExecuteIntegration:
+    """Full execute() path: default append survives a single mid-write 404 and
+    reports the retry count in its XCom return value."""
+
+    def test_execute_default_append_single_404_mid_write(self, context):
+        """Drive the operator through execute() end to end: a single transient
+        404 lands in the middle of a multi-batch positional write, the run
+        completes, the final grid is correct (no dupes), and the returned
+        (XCom) dict reflects one transient-404 retry."""
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = FakeSheetsHook(sheet)
+        # batch_size=1 → three data batches; fail AFTER the first data batch is
+        # applied so the 404 truly lands mid-write and the whole _write re-runs
+        # positionally into the same [E0+1 ..] window.
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[
+                {"name": "b", "n": 2},
+                {"name": "c", "n": 3},
+                {"name": "d", "n": 4},
+            ],
+            batch_size=1,
+            pause_between_batches=0,
+            transient_404_max_retries=3,
+            transient_404_base_delay=0,
+        )
+
+        result = _run_with_fake(hook, op, context)
+
+        # XCom return dict: mode + rows_written + retry count.
+        assert result["mode"] == "append"
+        assert result["rows_written"] == 3
+        assert result["transient_404_retries"] == 1
+        # Final grid is exactly right with no duplicated rows.
+        assert sheet.grid == [
+            ["name", "n"],
+            ["a", 1],
+            ["b", 2],
+            ["c", 3],
+            ["d", 4],
+        ]
+

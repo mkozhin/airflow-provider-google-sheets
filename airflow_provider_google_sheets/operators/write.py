@@ -43,7 +43,13 @@ class GoogleSheetsWriteOperator(BaseOperator):
     Supports three write modes:
 
     * ``overwrite`` — clear the target range and write new data.
-    * ``append`` — append rows after the last occupied row.
+    * ``append`` — add rows after the last occupied row.  By default this is a
+      **positional** ``values.update`` write (into a fixed ``[E0+1 .. E0+N]``
+      range), which is idempotent on an in-process re-run and therefore
+      resilient to transient ``404`` / ambiguous-success duplicates.  Set
+      ``append_insert_rows=True`` to restore the legacy ``INSERT_ROWS`` write
+      (see ``append_insert_rows``).  A full Airflow task-retry (fresh process)
+      is not covered by either path.
     * ``merge`` — update / insert / delete rows based on a key column.
       ``smart_merge`` is accepted as a silent alias.
 
@@ -111,14 +117,33 @@ class GoogleSheetsWriteOperator(BaseOperator):
             ``cell_range`` (write target and sort range must share the same
             ``table_start``).  Format is validated at DAG-load time; it is not a
             template field.
-        transient_404_max_retries: Number of times to re-run the *whole*
-            operation when Google Sheets returns a transient ``404`` on a
-            spreadsheet that really exists (observed after heavy writes).  Only
-            applies to the idempotent modes — ``overwrite`` and ``merge`` — and
-            to ``create_sheet_if_missing`` setup; ``append`` is intentionally
-            excluded (not idempotent, so it stays fail-fast).  A non-404
-            ``HttpError`` is re-raised immediately.  Must be a non-bool
-            ``int >= 0``; ``0`` disables the retry.  Defaults to ``3``.
+        append_insert_rows: Opt out of the default positional ``append`` and use
+            the legacy ``INSERT_ROWS`` write (``hook.append_values``) instead.
+            Defaults to ``False``.  The default positional path is idempotent on
+            an in-process re-run but relies on two assumptions: (1) **single
+            writer** — ``E0`` (the table height) is fixed between the read and
+            the write, so a concurrent foreign append into the same columns
+            would be overwritten; and (2) the table is the **last block** in its
+            columns — anything below the last non-empty row is overwritten.  Set
+            this to ``True`` for concurrent atomic inserts or for layouts with
+            content (e.g. a footer) below the table in the same columns.  Note a
+            header-emptiness divergence: the positional path decides whether to
+            write headers from the **windowed** column range, whereas the legacy
+            path checks only the single top-left cell — for a layout where the
+            top-left cell is empty but the same row has data to the right the two
+            differ (positional skips the header, legacy writes it).  Must be a
+            real ``bool``; validated at DAG-load time.
+        transient_404_max_retries: Number of times to re-run an operation (or,
+            for the default positional ``append``, the height read and the
+            positional write) when Google Sheets returns a transient ``404`` on
+            a spreadsheet that really exists (observed after heavy writes).
+            Applies to the idempotent modes — ``overwrite`` and ``merge`` — to
+            ``create_sheet_if_missing`` setup, and to the default positional
+            ``append`` (idempotent on an in-process re-run).  The legacy
+            ``append_insert_rows=True`` (INSERT_ROWS) path is **not** covered —
+            it is not idempotent and stays fail-fast.  A non-404 ``HttpError``
+            is re-raised immediately.  Must be a non-bool ``int >= 0``; ``0``
+            disables the retry.  Defaults to ``3``.
         transient_404_base_delay: Base delay in seconds for the exponential
             backoff between transient-404 re-runs (delay =
             ``base_delay * 2 ** (attempt - 1)``).  Must be a non-bool
@@ -409,8 +434,13 @@ class GoogleSheetsWriteOperator(BaseOperator):
         Only ``404`` is retried (the observed transient failure on an existing
         spreadsheet after heavy writes). Any other ``HttpError`` — and a 404
         once ``transient_404_max_retries`` re-runs are exhausted — is re-raised
-        immediately. Used only to wrap the idempotent operations
-        (overwrite / merge / ensure-sheet); ``append`` is never wrapped.
+        immediately. Used to wrap the idempotent operations
+        (overwrite / merge / ensure-sheet) and, since the default ``append`` is
+        now positional and idempotent on an in-process re-run, the height read
+        and the positional write of ``append`` as well (each wrapped separately,
+        with the post-write sort left outside the retried block). The legacy
+        ``append_insert_rows=True`` (INSERT_ROWS) path is never wrapped — it is
+        not idempotent and stays fail-fast.
 
         *label* names the wrapped operation (e.g. ``"overwrite"`` or
         ``"ensure_sheet"``) for the retry log — it is logged instead of
@@ -502,8 +532,15 @@ class GoogleSheetsWriteOperator(BaseOperator):
                 label="overwrite",
             )
         elif self.write_mode == "append":
-            # append is NOT idempotent — a re-run would double-write, so 404
-            # stays fail-fast here (see plan / idempotent-append design).
+            # append is called directly (no outer _run_with_transient_404_retry):
+            # the retry granularity lives *inside* the positional path
+            # (_execute_append_positional wraps the height read and the write
+            # separately, keeping the post-write sort out of the retried block).
+            # By default append is positional and idempotent on an in-process
+            # re-run, so transient 404s are retried safely; append_insert_rows=True
+            # opts into the legacy INSERT_ROWS path, which stays fail-fast.
+            # Note: a full Airflow task-retry (fresh process) is not covered —
+            # only in-process retries while the task is alive.
             result = self._execute_append(hook, headers, rows)
         elif self.write_mode in ("merge", "smart_merge"):
             result = self._run_with_transient_404_retry(
