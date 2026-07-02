@@ -4432,14 +4432,42 @@ class TestTransient404FailFast:
         sleep.assert_not_called()
         assert mock_hook.append_values.call_count == 1  # no operation-level retry
 
-    def test_default_append_retries_404_on_positional_write(self, context):
+    def test_default_append_retries_404_on_positional_write(self, context, caplog):
         """The default (positional) append RETRIES a transient 404 on the write
-        and completes with the correct final grid."""
+        and completes with the correct final grid, logging the INFO summary."""
         sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
         hook = FakeSheetsHook(sheet)
         # 404 after the first (and only) data-batch update_values → the whole
         # _write re-runs positionally and completes.
         hook.fail_once("update_values", status=404, when="after", occurrence=1)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"name": "b", "n": 2}],
+            pause_between_batches=0,
+            transient_404_max_retries=3,
+            transient_404_base_delay=0,
+        )
+        with caplog.at_level(
+            logging.INFO,
+            logger="airflow_provider_google_sheets.operators.write",
+        ):
+            result = _run_with_fake(hook, op, context)
+
+        assert result["transient_404_retries"] == 1
+        assert sheet.data_rows() == [["a", 1], ["b", 2]]
+        assert "append completed after 1 transient-404 retries" in caplog.text
+
+    def test_default_append_retries_404_on_e0_read(self, context):
+        """The E0 height read is wrapped in the 404-retry too: a transient 404 on
+        the get_values that reads the table height is retried, and the run
+        completes with the correct final grid."""
+        sheet = FakeSheet(grid=[["name", "n"], ["a", 1]])
+        hook = FakeSheetsHook(sheet)
+        # Fail the very first get_values (the E0 height read) BEFORE it returns →
+        # _read_e0 re-runs and the append proceeds from the same fixed height.
+        hook.fail_once("get_values", status=404, when="before", occurrence=1)
         op = GoogleSheetsWriteOperator(
             task_id="t",
             spreadsheet_id=SPREADSHEET_ID,
@@ -4653,6 +4681,95 @@ class TestAppendPositional:
         assert sheet.grid[2][1] == "b"
         assert sheet.grid[2][2] == 2
         assert len(sheet.grid[2]) == 3
+
+    def test_404_after_header_write_on_empty_sheet_no_double_header(self, context):
+        """A transient 404 right after the header write on an empty sheet re-runs
+        the whole write; the header must NOT be duplicated (positional re-write
+        lands on the same header cells)."""
+        sheet = FakeSheet(grid=[])
+        hook = FakeSheetsHook(sheet)
+        # On an empty sheet the first update_values is the header write; fail it
+        # AFTER the header is applied so the whole _write (header + data) re-runs.
+        hook.fail_once("update_values", status=404, when="after", occurrence=1)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            data=[{"a": 1, "b": 2}],
+            write_headers=True,
+            pause_between_batches=0,
+            transient_404_base_delay=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["transient_404_retries"] == 1
+        # Exactly one header row (no double header) + the single data row.
+        assert sheet.grid == [["a", "b"], [1, 2]]
+
+    def test_single_cell_cell_range_writes_full_payload_width(self, context):
+        """A single-cell cell_range (``C3``) only pins the top-left corner; a
+        payload wider than one column must still write all its columns."""
+        sheet = FakeSheet(grid=[])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            cell_range="C3",
+            data=[{"x": 1, "y": 2}],
+            write_headers=False,
+            pause_between_batches=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        # Row 3 (index 2): columns C and D both written, A/B untouched (empty).
+        assert sheet.grid[2][2] == 1
+        assert sheet.grid[2][3] == 2
+        assert sheet.grid[2][:2] == ["", ""]
+
+    def test_empty_payload_writes_header_on_empty_sheet(self, context):
+        """Empty payload + write_headers=True on an empty sheet still writes the
+        header row (parity with legacy append); grid-assert it landed."""
+        sheet = FakeSheet(grid=[])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            # list[list] with has_headers=True → headers=["a","b"], rows=[].
+            data=[["a", "b"]],
+            has_headers=True,
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        result = _run_with_fake(hook, op, context)
+
+        assert result["rows_written"] == 0
+        assert sheet.grid == [["a", "b"]]
+
+    def test_positional_header_and_data_at_non_a1_table_start(self, context):
+        """table_start='C3' on an empty sheet: header lands at C3, data at C4."""
+        sheet = FakeSheet(grid=[])
+        hook = FakeSheetsHook(sheet)
+        op = GoogleSheetsWriteOperator(
+            task_id="t",
+            spreadsheet_id=SPREADSHEET_ID,
+            write_mode="append",
+            table_start="C3",
+            data=[{"a": 1, "b": 2}],
+            write_headers=True,
+            pause_between_batches=0,
+        )
+        _run_with_fake(hook, op, context)
+
+        # Header at C3 (row index 2, cols C/D), data at C4 (row index 3).
+        assert sheet.grid[2][2] == "a"
+        assert sheet.grid[2][3] == "b"
+        assert sheet.grid[3][2] == 1
+        assert sheet.grid[3][3] == 2
+        # Columns A/B of both rows stay empty.
+        assert sheet.grid[2][:2] == ["", ""]
+        assert sheet.grid[3][:2] == ["", ""]
 
     def test_positional_append_applies_server_side_sort(self, context):
         """Task 6: the positional path server-side sorts the written table end to

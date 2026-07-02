@@ -48,6 +48,17 @@ def index_to_column_letter(index: int) -> str:
     return result
 
 
+def col_offset(start_col: str, offset: int) -> str:
+    """Column letter *offset* columns to the right of *start_col*.
+
+    ``col_offset("C", 0) == "C"``, ``col_offset("C", 3) == "F"``. Convenience
+    for callers that already hold a start column and only need the end column
+    of a fixed-width window (avoids fabricating an :class:`A1Range` just to call
+    :meth:`A1Range.col_at`).
+    """
+    return index_to_column_letter(column_letter_to_index(start_col) + offset)
+
+
 def parse_range_start(range_str: str) -> tuple[str, int]:
     """Extract the start column and row from an A1-notation range, leniently.
 

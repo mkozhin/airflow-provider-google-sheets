@@ -15,6 +15,7 @@ from googleapiclient.errors import HttpError
 from airflow_provider_google_sheets.hooks.google_sheets import GoogleSheetsHook
 from airflow_provider_google_sheets.utils.a1 import (
     A1Range,
+    col_offset,
     column_letter_to_index,
     index_to_column_letter,
     parse_range_start,
@@ -617,8 +618,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
             hook.clear_values(self.spreadsheet_id, clear_range)
         else:
             # clear_mode == "range": clear only the data columns
-            window = A1Range.parse(f"{start_col}{start_row_num}")
-            end_col = window.col_at(num_data_cols - 1) if num_data_cols else start_col
+            end_col = col_offset(start_col, num_data_cols - 1) if num_data_cols else start_col
             clear_range = f"{prefix}{start_col}{start_row_num}:{end_col}"
             logger.info("Clearing range %s", clear_range)
             hook.clear_values(self.spreadsheet_id, clear_range)
@@ -711,6 +711,10 @@ class GoogleSheetsWriteOperator(BaseOperator):
         overwritten. Use ``append_insert_rows=True`` for concurrent atomic
         inserts. Also assumes the table is the last block in its columns (any
         content below the last non-empty row is overwritten).
+
+        When ``cell_range`` is set it only bounds the column *window*; its
+        end-row is intentionally ignored — ``E0`` is read to the bottom of the
+        window and new rows may land below the ``cell_range`` end row.
         """
         prefix = self._sheet_prefix()
 
@@ -732,8 +736,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
         # Read E0 — absolute row of the last non-empty row in the window, from
         # the table's top row downward; start_row-1 when the window is empty.
         # The read is idempotent, so it is safe to wrap in the 404-retry.
-        read_col = A1Range.parse(f"{start_col}{start_row}")
-        end_col = read_col.col_at(max(width, 1) - 1)
+        end_col = col_offset(start_col, max(width, 1) - 1)
         read_range = f"{prefix}{start_col}{start_row}:{end_col}"
 
         def _read_e0() -> int:
@@ -835,8 +838,7 @@ class GoogleSheetsWriteOperator(BaseOperator):
             # have internal gaps and Sheets trims trailing empties, so read
             # the full table width and take the last row that has any
             # non-empty cell.
-            window = A1Range.parse(f"{start_col}{start_row}")
-            end_col = window.col_at(len(headers) - 1)
+            end_col = col_offset(start_col, len(headers) - 1)
             existing_block = hook.get_values(
                 self.spreadsheet_id, f"{prefix}{start_col}{start_row}:{end_col}"
             )
